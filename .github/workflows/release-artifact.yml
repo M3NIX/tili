@@ -1,0 +1,114 @@
+name: Release Artifact
+
+on:
+  push:
+    tags: ["v*", "release-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl linker
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/db/
+            target/
+          key: release-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Test
+        run: cargo test --locked --target "$TARGET"
+
+      - name: Build
+        run: cargo build --locked --release --target "$TARGET"
+
+      - name: Verify static linking
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          readelf --program-headers "target/$TARGET/release/tili" > program-headers.txt
+          if grep --quiet INTERP program-headers.txt; then
+            echo "Expected a statically linked musl binary" >&2
+            exit 1
+          fi
+
+      - name: Prepare artifact
+        run: |
+          tag="${GITHUB_REF_NAME//\//-}"
+          archive="tili-${tag}-${TARGET}.tar.gz"
+          install -Dm755 "target/$TARGET/release/tili" package/tili
+          install -Dm644 README.md package/README.md
+          mkdir -p dist
+          tar -C package -czf "dist/$archive" tili README.md
+          (cd dist && sha256sum "$archive" > "$archive.sha256")
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tili-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tili-*
+          merge-multiple: true
+          path: dist
+
+      - name: Attach artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+          fi
