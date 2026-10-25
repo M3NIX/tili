@@ -9,13 +9,15 @@ over SSH—no daemon, graphical environment, or client-side companion required.
 - i3-style splits, directional navigation, resizing, and fullscreen panes.
 - Ten workspaces with a compact workspace bar.
 - A scriptable launcher with case-insensitive fuzzy search and highlighted matches.
-- Built-in SSH host discovery from `~/.ssh/config`.
+- Native Rust SSH host discovery from `~/.ssh/config`.
 - Mouse selection, copy-on-release, and per-pane scrollback.
 
 ## Install
 
 Requires Linux and a stable Rust toolchain. The native SSH launcher uses the
 system OpenSSH client; Python is not required.
+
+From a checkout of this repository:
 
 ```sh
 cargo install --path .
@@ -36,6 +38,7 @@ ssh -t user@server tili
 | Alt+T | New shell in the focused pane's working directory, when detectable |
 | Alt+Backspace | Close pane |
 | Alt+H / Alt+V | Next split: side by side / above and below |
+| Alt+E | Toggle split orientation |
 | Alt+J / K / L / Semicolon | Focus left / down / up / right |
 | Alt+Shift + direction | Move pane |
 | Alt+R | Resize mode; use the same directions, then Enter or Escape |
@@ -61,6 +64,9 @@ trusted scripts: they run with your user's permissions.
 
 No configuration is required. Optional settings live at
 `~/.config/tili/config.toml`, or `$XDG_CONFIG_HOME/tili/config.toml`.
+If an older SSH mode explicitly uses `command = "~/.config/tili/scripts/ssh-hosts.py"`,
+replace that setting with `builtin = "ssh"`. Custom script modes are unchanged.
+
 See [AGENTS.md](AGENTS.md) for configuration examples, the script protocol,
 development notes, and testing guidance.
 
