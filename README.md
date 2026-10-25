@@ -60,6 +60,23 @@ Use Up/Down to select, Ctrl+R to refresh, and Escape to close.
 Additional launcher modes can use your own executable scripts. Configure only
 trusted scripts: they run with your user's permissions.
 
+For a minimal Python example, copy `scripts/example-menu.py` to your scripts
+directory, make it executable, and add a mode:
+
+```sh
+install -Dm755 scripts/example-menu.py ~/.config/tili/scripts/example-menu.py
+```
+
+```toml
+[[launcher.modes]]
+name = "examples"
+command = "~/.config/tili/scripts/example-menu.py"
+```
+
+The example lists two entries and opens the selected command in a new pane.
+External modes use `script list` for JSON Lines entries and
+`script select <id>` for one JSON action response.
+
 ## Configuration
 
 No configuration is required. Optional settings live at
