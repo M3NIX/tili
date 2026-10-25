@@ -522,15 +522,10 @@ impl App {
         }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Esc => self.launcher.close(),
-            KeyCode::Left if !control && !shift && !alt => {
-                self.launcher.previous_mode(&self.launcher_tx)
-            }
-            KeyCode::Right if !control && !shift && !alt => {
-                self.launcher.next_mode(&self.launcher_tx)
-            }
+            KeyCode::Left if !control => self.launcher.previous_mode(&self.launcher_tx),
+            KeyCode::Right if !control => self.launcher.next_mode(&self.launcher_tx),
             KeyCode::Up => self.launcher.select_previous(),
             KeyCode::Down => self.launcher.select_next(),
             KeyCode::Enter => self.launcher.select(&self.launcher_tx),
@@ -1145,7 +1140,10 @@ impl Drop for SignalThread {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::config::{BuiltinMode, LauncherConfig, LauncherModeConfig};
     use crossterm::event::{MouseButton, MouseEvent};
 
     #[test]
@@ -1313,6 +1311,42 @@ mod tests {
         assert_eq!(app.layout().pane_count(), 2);
         assert_eq!(app.layout().focused(), Some(PaneId(2)));
         assert!(app.panes.contains_key(&PaneId(2)));
+    }
+
+    #[test]
+    fn launcher_arrow_keys_switch_modes_and_wrap() {
+        let configuration = Config {
+            launcher: LauncherConfig {
+                default_mode: "ssh".to_owned(),
+                width_percent: 60,
+                max_results: 10,
+                timeout_ms: 1_000,
+                modes: vec![
+                    LauncherModeConfig {
+                        name: "ssh".to_owned(),
+                        command: None,
+                        builtin: Some(BuiltinMode::Ssh),
+                    },
+                    LauncherModeConfig {
+                        name: "examples".to_owned(),
+                        command: Some(PathBuf::from("/bin/true")),
+                        builtin: None,
+                    },
+                ],
+            },
+            ..Config::default_for(Path::new("/tmp/tili-arrow-test"))
+        };
+        let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
+        let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
+        let mut app = App::new(80, 24, pty_tx, launcher_tx, &configuration).unwrap();
+        app.launcher.open(&app.launcher_tx);
+        assert_eq!(app.launcher.mode_name(), "ssh");
+        app.handle_launcher_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.launcher.mode_name(), "examples");
+        app.handle_launcher_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(app.launcher.mode_name(), "ssh");
+        app.handle_launcher_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(app.launcher.mode_name(), "examples");
     }
 
     #[test]
