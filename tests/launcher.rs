@@ -196,8 +196,10 @@ fn fuzzy_filtering_and_mode_switching_work() {
 
     launcher.next_mode(&events);
     assert_eq!(launcher.mode_name(), "docker");
-    launcher.previous_mode(&events);
+    launcher.next_mode(&events);
     assert_eq!(launcher.mode_name(), "ssh");
+    launcher.previous_mode(&events);
+    assert_eq!(launcher.mode_name(), "docker");
 }
 
 #[test]

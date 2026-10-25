@@ -522,8 +522,15 @@ impl App {
         }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Esc => self.launcher.close(),
+            KeyCode::Left if !control && !shift && !alt => {
+                self.launcher.previous_mode(&self.launcher_tx)
+            }
+            KeyCode::Right if !control && !shift && !alt => {
+                self.launcher.next_mode(&self.launcher_tx)
+            }
             KeyCode::Up => self.launcher.select_previous(),
             KeyCode::Down => self.launcher.select_next(),
             KeyCode::Enter => self.launcher.select(&self.launcher_tx),
