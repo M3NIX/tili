@@ -54,17 +54,14 @@ impl Config {
         if self.general.resize_step == 0 {
             anyhow::bail!("general.resize_step must be greater than zero");
         }
-    validate_color("appearance.focused_border", &self.appearance.focused_border)?;
-    validate_color(
-        "appearance.unfocused_border",
-        &self.appearance.unfocused_border,
-    )?;
-    if let Some(background) = &self.appearance.background {
-        validate_color("appearance.background", background)?;
-    }
-    if !(20..=100).contains(&self.launcher.width_percent) {
-        anyhow::bail!("launcher.width_percent must be between 20 and 100");
-    }
+        validate_color("appearance.focused_border", &self.appearance.focused_border)?;
+        validate_color(
+            "appearance.unfocused_border",
+            &self.appearance.unfocused_border,
+        )?;
+        if !(20..=100).contains(&self.launcher.width_percent) {
+            anyhow::bail!("launcher.width_percent must be between 20 and 100");
+        }
         if self.launcher.max_results == 0 || self.launcher.max_results > 100 {
             anyhow::bail!("launcher.max_results must be between 1 and 100");
         }
@@ -84,14 +81,11 @@ impl Config {
 }
 
 fn validate_color(name: &str, value: &str) -> Result<()> {
-    if value.eq_ignore_ascii_case("transparent") || value.eq_ignore_ascii_case("none") {
-        return Ok(());
-    }
     let bytes = value.as_bytes();
     let valid =
         bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(u8::is_ascii_hexdigit);
     if !valid {
-        anyhow::bail!("{name} must use #RRGGBB format or transparent");
+        anyhow::bail!("{name} must use #RRGGBB format");
     }
     Ok(())
 }
@@ -142,8 +136,6 @@ impl From<SplitConfig> for Orientation {
 pub struct AppearanceConfig {
     pub focused_border: String,
     pub unfocused_border: String,
-    #[serde(default)]
-    pub background: Option<String>,
 }
 
 impl Default for AppearanceConfig {
@@ -151,7 +143,6 @@ impl Default for AppearanceConfig {
         Self {
             focused_border: "#3971ED".to_owned(),
             unfocused_border: "#282a2e".to_owned(),
-            background: None,
         }
     }
 }

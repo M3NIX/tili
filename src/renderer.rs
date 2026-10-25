@@ -23,7 +23,7 @@ use crate::pane::Pane;
 use crate::tiling::{Orientation, PaneGeometry, PaneId, Rect};
 use crate::workspace::WORKSPACE_COUNT;
 
-const DEFAULT_BACKGROUND: Color = Color::Rgb {
+const BACKGROUND: Color = Color::Rgb {
     r: 0x1d,
     g: 0x1f,
     b: 0x21,
@@ -66,7 +66,6 @@ pub struct TerminalRenderer {
     previous_size: (u16, u16),
     focused_border: Color,
     unfocused_border: Color,
-    background: Color,
     clipboard: Clipboard,
 }
 
@@ -89,12 +88,6 @@ impl TerminalRenderer {
     pub fn enter(appearance: &AppearanceConfig) -> Result<Self> {
         let focused_border = parse_color(&appearance.focused_border)?;
         let unfocused_border = parse_color(&appearance.unfocused_border)?;
-        let background = appearance
-            .background
-            .as_deref()
-            .map(parse_color)
-            .transpose()?
-            .unwrap_or(DEFAULT_BACKGROUND);
         enable_raw_mode().context("failed to enable terminal raw mode")?;
         let mut output = stdout();
         if let Err(error) = output
@@ -119,7 +112,6 @@ impl TerminalRenderer {
             previous_size: (0, 0),
             focused_border,
             unfocused_border,
-            background,
             clipboard: Clipboard::new(),
         })
     }
@@ -127,12 +119,6 @@ impl TerminalRenderer {
     pub fn update_appearance(&mut self, appearance: &AppearanceConfig) -> Result<()> {
         self.focused_border = parse_color(&appearance.focused_border)?;
         self.unfocused_border = parse_color(&appearance.unfocused_border)?;
-        self.background = appearance
-            .background
-            .as_deref()
-            .map(parse_color)
-            .transpose()?
-            .unwrap_or(DEFAULT_BACKGROUND);
         Ok(())
     }
 
@@ -144,7 +130,7 @@ impl TerminalRenderer {
         bounds: Rect,
         overlays: RenderOverlays<'_>,
     ) -> Result<()> {
-        let mut canvas = Canvas::new_with_background(bounds.width, bounds.height, self.background);
+        let mut canvas = Canvas::new(bounds.width, bounds.height);
         for geometry in layout {
             if let Some(pane) = panes.get(&geometry.pane) {
                 canvas.draw_pane_contents(pane, geometry.rect);
@@ -224,13 +210,9 @@ impl TerminalRenderer {
             let y = u16::try_from(index / width).unwrap_or(u16::MAX);
             self.output
                 .queue(MoveTo(x, y))?
-                .queue(SetAttribute(Attribute::Reset))?;
-            self.output.queue(SetForegroundColor(cell.foreground))?;
-            if matches!(cell.background, Color::Reset) {
-                self.output.queue(ResetColor)?;
-            } else {
-                self.output.queue(SetBackgroundColor(cell.background))?;
-            }
+                .queue(SetAttribute(Attribute::Reset))?
+                .queue(SetForegroundColor(cell.foreground))?
+                .queue(SetBackgroundColor(cell.background))?;
             if cell.bold {
                 self.output.queue(SetAttribute(Attribute::Bold))?;
             }
@@ -281,7 +263,7 @@ impl Default for RenderCell {
         Self {
             text: " ".to_owned(),
             foreground: FOREGROUND,
-            background: DEFAULT_BACKGROUND,
+            background: BACKGROUND,
             bold: false,
             dim: false,
             italic: false,
@@ -299,26 +281,10 @@ struct Canvas {
 
 impl Canvas {
     fn new(width: u16, height: u16) -> Self {
-        Self::new_with_background(width, height, DEFAULT_BACKGROUND)
-    }
-
-    fn new_with_background(width: u16, height: u16, background: Color) -> Self {
         Self {
             width,
             height,
-            cells: vec![
-                RenderCell {
-                    text: " ".to_owned(),
-                    foreground: FOREGROUND,
-                    background,
-                    bold: false,
-                    dim: false,
-                    italic: false,
-                    underline: false,
-                    wide_continuation: false,
-                };
-                usize::from(width) * usize::from(height)
-            ],
+            cells: vec![RenderCell::default(); usize::from(width) * usize::from(height)],
         }
     }
 
@@ -346,17 +312,17 @@ impl Canvas {
         let right = rect.x.saturating_add(rect.width.saturating_sub(1));
         let bottom = rect.y.saturating_add(rect.height.saturating_sub(1));
         for x in rect.x..=right {
-            self.set(x, rect.y, Self::styled_cell("─", color, self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background)));
-            self.set(x, bottom, Self::styled_cell("─", color, self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background)));
+            self.set(x, rect.y, Self::styled_cell("─", color, BACKGROUND));
+            self.set(x, bottom, Self::styled_cell("─", color, BACKGROUND));
         }
         for y in rect.y..=bottom {
-            self.set(rect.x, y, Self::styled_cell("│", color, self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background)));
-            self.set(right, y, Self::styled_cell("│", color, self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background)));
+            self.set(rect.x, y, Self::styled_cell("│", color, BACKGROUND));
+            self.set(right, y, Self::styled_cell("│", color, BACKGROUND));
         }
-        self.set(rect.x, rect.y, Self::styled_cell("┌", color, self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background)));
-        self.set(right, rect.y, Self::styled_cell("┐", color, self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background)));
-        self.set(rect.x, bottom, Self::styled_cell("└", color, self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background)));
-        self.set(right, bottom, Self::styled_cell("┘", color, self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background)));
+        self.set(rect.x, rect.y, Self::styled_cell("┌", color, BACKGROUND));
+        self.set(right, rect.y, Self::styled_cell("┐", color, BACKGROUND));
+        self.set(rect.x, bottom, Self::styled_cell("└", color, BACKGROUND));
+        self.set(right, bottom, Self::styled_cell("┘", color, BACKGROUND));
     }
 
     fn draw_pane_contents(&mut self, pane: &Pane, rect: Rect) {
@@ -392,7 +358,7 @@ impl Canvas {
                 } else {
                     (
                         map_color(screen, foreground, ColorRole::Foreground, FOREGROUND),
-                        map_color(screen, background, ColorRole::Background, self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background)),
+                        map_color(screen, background, ColorRole::Background, BACKGROUND),
                     )
                 };
                 self.set(
@@ -423,14 +389,13 @@ impl Canvas {
         }
         let right = rect.x.saturating_add(rect.width.saturating_sub(1));
         let bottom = rect.y.saturating_add(rect.height.saturating_sub(1));
-        let bg = self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background);
         match orientation {
             Orientation::Horizontal => {
                 for y in rect.y.saturating_add(1)..bottom {
                     self.set(
                         right,
                         y,
-                        Self::styled_cell("│", SPLIT_INDICATOR, bg),
+                        Self::styled_cell("│", SPLIT_INDICATOR, BACKGROUND),
                     );
                 }
             }
@@ -439,7 +404,7 @@ impl Canvas {
                     self.set(
                         x,
                         bottom,
-                        Self::styled_cell("─", SPLIT_INDICATOR, bg),
+                        Self::styled_cell("─", SPLIT_INDICATOR, BACKGROUND),
                     );
                 }
             }
@@ -467,14 +432,13 @@ impl Canvas {
         if bounds.width == 0 || bounds.height == 0 {
             return;
         }
-        let bg = self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background);
         self.draw_text(
             bounds.x,
             bounds.y,
             usize::from(bounds.width),
             "",
             FOREGROUND,
-            bg,
+            BACKGROUND,
         );
         let mut x = bounds.x;
         for (index, open) in workspaces.open.into_iter().enumerate() {
@@ -535,8 +499,7 @@ impl Canvas {
             width,
             height,
         );
-        let bg = self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background);
-        self.fill_rect(rect, bg);
+        self.fill_rect(rect, BACKGROUND);
         self.draw_border(rect, SELECTION);
         let inner_width = usize::from(rect.width.saturating_sub(2));
         self.draw_text(
@@ -545,7 +508,7 @@ impl Canvas {
             inner_width,
             &format!(" {} ", launcher.mode_name()),
             FOREGROUND,
-            bg,
+            BACKGROUND,
         );
         self.draw_text(
             rect.x.saturating_add(1),
@@ -553,7 +516,7 @@ impl Canvas {
             inner_width,
             &format!("Search: {}_", launcher.query()),
             FOREGROUND,
-            bg,
+            BACKGROUND,
         );
         if let Some(status) = launcher.status() {
             self.draw_text(
@@ -562,7 +525,7 @@ impl Canvas {
                 inner_width,
                 status,
                 ERROR,
-                bg,
+                BACKGROUND,
             );
             return;
         }
@@ -573,7 +536,7 @@ impl Canvas {
                 inner_width,
                 "No matches",
                 FOREGROUND,
-                bg,
+                BACKGROUND,
             );
             return;
         }
@@ -587,7 +550,6 @@ impl Canvas {
             }
             let description = entry.description.as_deref().unwrap_or("");
             let separator = if description.is_empty() { "" } else { " — " };
-            let bg = self.cells.first().map_or(DEFAULT_BACKGROUND, |c| c.background);
             self.draw_text(
                 rect.x.saturating_add(1),
                 y,
@@ -600,7 +562,7 @@ impl Canvas {
                     description
                 ),
                 FOREGROUND,
-                if selected { SELECTION } else { bg },
+                if selected { SELECTION } else { BACKGROUND },
             );
             self.highlight_matches(
                 rect.x.saturating_add(3),
@@ -775,12 +737,9 @@ fn map_color(
 }
 
 fn parse_color(value: &str) -> Result<Color> {
-    if value.eq_ignore_ascii_case("transparent") || value.eq_ignore_ascii_case("none") {
-        return Ok(Color::Reset);
-    }
     let bytes = value.as_bytes();
     if bytes.len() != 7 || bytes[0] != b'#' || !bytes[1..].iter().all(u8::is_ascii_hexdigit) {
-        anyhow::bail!("invalid color {value:?}; expected #RRGGBB or transparent");
+        anyhow::bail!("invalid color {value:?}; expected #RRGGBB");
     }
     let red = u8::from_str_radix(&value[1..3], 16)
         .with_context(|| format!("invalid red component in {value}"))?;
@@ -801,7 +760,7 @@ mod tests {
 
     #[test]
     fn fuzzy_highlights_preserve_selection_and_unicode_geometry() {
-        for background in [DEFAULT_BACKGROUND, SELECTION] {
+        for background in [BACKGROUND, SELECTION] {
             let mut canvas = Canvas::new(14, 1);
             let label = "a\u{1b}界e\u{301} 👩‍💻 tail";
             canvas.draw_text(2, 0, 8, label, FOREGROUND, background);
@@ -822,7 +781,7 @@ mod tests {
             assert!(!canvas.cells.iter().any(|cell| cell.bold));
         }
         let mut canvas = Canvas::new(4, 1);
-        canvas.draw_text(0, 0, 4, "a\r\nb", FOREGROUND, DEFAULT_BACKGROUND);
+        canvas.draw_text(0, 0, 4, "a\r\nb", FOREGROUND, BACKGROUND);
         canvas.highlight_matches(0, 0, 4, "a\r\nb", &[3]);
         assert_eq!(canvas.cells[1].text, "b");
         assert!(canvas.cells[1].bold);
@@ -831,7 +790,7 @@ mod tests {
     #[test]
     fn overlay_text_uses_grapheme_width_and_filters_controls() {
         let mut canvas = Canvas::new(8, 1);
-        canvas.draw_text(1, 0, 5, "界e\u{301}\u{1b}\n\t界!", FOREGROUND, DEFAULT_BACKGROUND);
+        canvas.draw_text(1, 0, 5, "界e\u{301}\u{1b}\n\t界!", FOREGROUND, BACKGROUND);
         assert_eq!(canvas.cells[1].text, "界");
         assert!(canvas.cells[2].wide_continuation);
         assert_eq!(canvas.cells[3].text, "e\u{301}");
@@ -841,9 +800,9 @@ mod tests {
         assert_eq!(clipped_text("界", 1), "");
         assert_eq!(clipped_text("👩‍💻!", 2), "👩‍💻");
         assert_eq!(clipped_text("\u{301}A", 2), "A");
-        canvas.draw_text(7, 0, 100, "界", FOREGROUND, DEFAULT_BACKGROUND);
+        canvas.draw_text(7, 0, 100, "界", FOREGROUND, BACKGROUND);
         assert_eq!(canvas.cells[7].text, " ");
-        canvas.draw_text(1, 0, 5, "abc", FOREGROUND, DEFAULT_BACKGROUND);
+        canvas.draw_text(1, 0, 5, "abc", FOREGROUND, BACKGROUND);
         assert!(!canvas.cells.iter().any(|cell| cell.wide_continuation));
     }
 
@@ -855,7 +814,7 @@ mod tests {
         second.draw_border(Rect::new(0, 0, 20, 5), FOCUSED_BORDER);
         assert_eq!(first.cells, second.cells);
 
-        second.set(1, 1, Canvas::styled_cell("x", FOREGROUND, DEFAULT_BACKGROUND));
+        second.set(1, 1, Canvas::styled_cell("x", FOREGROUND, BACKGROUND));
         assert_ne!(first.cells, second.cells);
     }
 
