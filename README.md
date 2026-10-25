@@ -64,8 +64,6 @@ trusted scripts: they run with your user's permissions.
 
 No configuration is required. Optional settings live at
 `~/.config/tili/config.toml`, or `$XDG_CONFIG_HOME/tili/config.toml`.
-If an older SSH mode explicitly uses `command = "~/.config/tili/scripts/ssh-hosts.py"`,
-replace that setting with `builtin = "ssh"`. Custom script modes are unchanged.
 
 See [AGENTS.md](AGENTS.md) for configuration examples, the script protocol,
 development notes, and testing guidance.
