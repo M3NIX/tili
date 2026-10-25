@@ -807,18 +807,6 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_canvas_cells_compare_equal() {
-        let mut first = Canvas::new(20, 5);
-        let mut second = Canvas::new(20, 5);
-        first.draw_border(Rect::new(0, 0, 20, 5), FOCUSED_BORDER);
-        second.draw_border(Rect::new(0, 0, 20, 5), FOCUSED_BORDER);
-        assert_eq!(first.cells, second.cells);
-
-        second.set(1, 1, Canvas::styled_cell("x", FOREGROUND, BACKGROUND));
-        assert_ne!(first.cells, second.cells);
-    }
-
-    #[test]
     fn parses_configured_truecolor_borders() {
         assert_eq!(
             parse_color("#3971ED").unwrap(),

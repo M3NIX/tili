@@ -8,6 +8,9 @@ These instructions apply throughout the repository.
   edition 2024, small modules, and threads/channels rather than an async framework.
 - Preserve working keyboard, mouse, clipboard, pane, and workspace behavior.
   Add focused regression tests when changing these paths.
+- Test existing features, concrete bug regressions, and meaningful edge cases.
+  Do not add tests merely to assert that removed or unimplemented features are
+  absent. Keep negative tests for validation, safety, and failure handling.
 - Use portable-pty for process terminals, tastty-core for terminal emulation and
   selection, crossterm for host terminal I/O, and nucleo-matcher for fuzzy search.
   Do not recreate terminal parsing or selection logic in application code.

@@ -1274,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn pointer_lookup_only_changes_focus_after_a_motion_event_uses_it() {
+    fn pane_hit_testing_uses_geometry_and_rejects_positions_outside_panes() {
         let layout = vec![
             PaneGeometry {
                 pane: PaneId(1),
