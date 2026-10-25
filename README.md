@@ -21,10 +21,13 @@ there and still get the i3-style workflow.
 
 ## Install
 
-Requires Linux and a stable Rust toolchain. The native SSH launcher uses the
-system OpenSSH client; Python is not required.
+Requires Linux. The native SSH launcher uses the system OpenSSH client; Python
+is not required.
 
-From a checkout of this repository:
+Download a prebuilt binary from the
+[GitHub releases page](https://github.com/M3NIX/tili/releases), or compile it
+yourself. Compiling requires a stable Rust toolchain; from a checkout of this
+repository:
 
 ```sh
 cargo install --path .
@@ -77,10 +80,16 @@ install -Dm755 scripts/example-menu.py ~/.config/tili/scripts/example-menu.py
 ```toml
 # ~/.config/tili/config.toml
 [[launcher.modes]]
+name = "ssh"
+builtin = "ssh"
+
+[[launcher.modes]]
 name = "examples"
 command = "~/.config/tili/scripts/example-menu.py"
 ```
 
+Each mode must specify exactly one of `builtin` or `command`. Keep the `ssh`
+builtin entry when adding other modes so the SSH launcher remains available.
 External modes use `script list` for JSON Lines entries and
 `script select <id>` for one JSON action response.
 
