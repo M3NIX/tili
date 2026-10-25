@@ -7,11 +7,7 @@ import sys
 MENU = {
     "shell": {
         "label": "Open shell",
-        "action": {
-            "action": "open_pane",
-            "command": "/bin/bash",
-            "args": ["-i"],
-        },
+        "action": {"action": "open_pane", "command": "/bin/bash", "args": []},
     },
     "top": {
         "label": "System monitor",
