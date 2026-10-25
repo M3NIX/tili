@@ -143,10 +143,13 @@ impl Pane {
     }
 
     pub fn selected_text(&self) -> Option<String> {
-        self.terminal
-            .screen()
-            .selected_text()
-            .filter(|text| text.chars().any(|character| !character.is_whitespace()))
+        let screen = self.terminal.screen();
+        let text = if screen.mode(TerminalMode::AlternateScreen) {
+            alternate_screen_selected_text(screen)
+        } else {
+            screen.selected_text()
+        };
+        text.filter(|text| text.chars().any(|character| !character.is_whitespace()))
     }
 
     pub fn resize(&mut self, columns: u16, rows: u16) -> Result<()> {
@@ -211,4 +214,18 @@ impl Pane {
     pub fn has_exited(&self) -> bool {
         self.exited
     }
+}
+
+fn alternate_screen_selected_text(screen: &Screen) -> Option<String> {
+    let range = screen.selection_range()?;
+    let start = screen.absolute_to_visible(range.start)?;
+    let end = screen.absolute_to_visible(range.end)?;
+    Some(
+        screen
+            .contents_between(start, end)
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }

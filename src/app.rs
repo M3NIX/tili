@@ -1526,6 +1526,36 @@ mod tests {
     }
 
     #[test]
+    fn mouse_drag_copies_text_from_alternate_screen() {
+        let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
+        let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
+        let config = Config::default_for(std::path::Path::new("/tmp/tili-selection-test"));
+        let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
+        app.panes
+            .get_mut(&PaneId(1))
+            .unwrap()
+            .process_output(b"\x1b[?1049hhello  \r\nworld")
+            .unwrap();
+
+        for (kind, column, row) in [
+            (MouseEventKind::Down(MouseButton::Left), 1, 2),
+            (MouseEventKind::Drag(MouseButton::Left), 7, 3),
+            (MouseEventKind::Up(MouseButton::Left), 7, 3),
+        ] {
+            app.handle_terminal(TerminalEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .unwrap();
+        }
+
+        assert_eq!(app.pending_clipboard.as_deref(), Some("hello\nworld"));
+        assert_eq!(app.selection, Some(PaneId(1)));
+    }
+
+    #[test]
     fn mouse_drag_across_rows_queues_multiline_text() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
