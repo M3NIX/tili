@@ -20,20 +20,16 @@ These instructions apply throughout the repository.
 
 ## Installation and maintenance
 
-Requirements: Linux, stable Rust, and Python 3 for the bundled SSH launcher only.
-The Rust core does not depend on Python. Build with `cargo build --release`;
+Requirements: Linux, stable Rust, and the system OpenSSH client for connections.
+The SSH picker is native Rust and does not depend on Python. Build with `cargo build --release`;
 install with `cargo install --path .`.
 
-The bundled script is installed on first startup at
-`~/.config/tili/scripts/ssh-hosts.py` (under `$XDG_CONFIG_HOME/tili` when set).
-Existing scripts are preserved. To update it, first check for user modifications,
-then install the bundled version into the corresponding configuration directory:
-
-```console
-install -m 755 scripts/ssh-hosts.py ~/.config/tili/scripts/ssh-hosts.py
-```
-
-Do not overwrite customized launcher scripts silently.
+The default launcher mode uses `builtin = "ssh"`. No script is installed on startup.
+For configurations from older versions, replace the SSH mode's
+`command = "~/.config/tili/scripts/ssh-hosts.py"` with `builtin = "ssh"`.
+Do not silently rewrite user configurations or delete previously installed scripts.
+Custom modes continue using `command = "/path/to/script"` and the unchanged JSON
+protocol. Each mode must specify exactly one of `builtin` or `command`.
 A deterministic layout preview is available with `cargo run --example layout`.
 
 ## Key bindings
@@ -56,7 +52,6 @@ layout rather than substituting conventional Vim navigation.
 | Alt+1 ... Alt+0 | Switch to workspace 1 ... 10 |
 | Alt+Shift+1 ... Alt+Shift+0 | Move the focused pane to workspace 1 ... 10 |
 | Alt+Shift+C | Reload configuration |
-| Alt+Shift+E | Exit after confirmation |
 
 Resize mode uses J/Left to shrink width, K/Down to grow height, L/Up to shrink
 height, and Semicolon/Right to grow width. Enter, Escape, or Alt+R exits the
@@ -147,13 +142,18 @@ The SSH mode reads concrete aliases from `~/.ssh/config`, including recursive
 specifies a hostname, or just the alias otherwise. Search is fuzzy and
 case-insensitive across the entire label; matched characters are highlighted in
 bold yellow, independently of the selected row. Selecting still connects by alias.
-HostName values are displayed literally, without expanding tokens or evaluating
-wildcard/conditional defaults. Discovery supports
+Host discovery uses `ssh2-config` (default features disabled), not a hand-written
+parser or an SSH protocol client. It supplies quoting, keyword handling, Include
+globbing, cycle detection, and host scope matching. HostName values are displayed
+literally, including matching defaults, without expanding tokens. Discovery supports
 `Include` directives with relative paths and globs. It excludes wildcards and
 negated patterns, deduplicates aliases, and never reads or displays key or
 password values. It is an alias discovery tool, not a complete OpenSSH
 configuration evaluator: `Match` conditions and aliases generated dynamically
-by external tools are not evaluated. Selecting an alias starts the system
+by external tools are not evaluated or executed. HostName values in blocks with
+unhandled Match directives are omitted rather than treated as unconditional.
+Include cycles and parser errors are reported in the launcher.
+Selecting an alias starts the system
 `ssh` client in a new PTY, preserving normal agents, keys, ProxyJump, host-key
 prompts, and interactive authentication.
 Ordinary shell panes close normally after `exit` or Ctrl+D regardless of their
@@ -186,7 +186,7 @@ timeout_ms = 3000
 
 [[launcher.modes]]
 name = "ssh"
-command = "~/.config/tili/scripts/ssh-hosts.py"
+builtin = "ssh"
 
 [[launcher.modes]]
 name = "docker"
@@ -245,7 +245,7 @@ selections never invoke a clipboard backend.
 
 GitHub Actions runs formatting, Clippy, tests, and a release build on Linux
 x86_64 and ARM64 for pull requests and pushes to main/master. CI can also be
-started manually. Python 3 is required for SSH discovery and PTY tests and is
+started manually. Python 3 is used only by external-script and PTY test fixtures and is
 provided by the Ubuntu runners.
 
 Pushing a `v*` or `release-*` tag triggers `.github/workflows/release-artifact.yml`.
@@ -254,7 +254,10 @@ then attaches archives and SHA-256 checksums to a GitHub Release. Only the publi
 job has write permissions. glibc builds use Ubuntu 24.04; the musl build is
 checked for static linking. There is no native Windows build: SSH clients can
 run on other operating systems, but tili itself runs on Linux.
-The SSH script is embedded in the binary and installed at first startup.
+The native SSH mode runs `tili --ssh-picker list|select` in a supervised helper
+process, reusing launcher cancellation, timeouts, output limits, and process-group
+cleanup. It does not install or invoke a Python script. External script modes
+and their `list`/`select` JSON protocol remain unchanged.
 Hosted workflows must be verified on GitHub; local checks cannot validate runner
 availability, repository permissions, or release publication.
 
@@ -279,7 +282,7 @@ Manual terminal compatibility checklist (local and over SSH):
    borders do not disappear or flash.
 7. Select an SSH alias and verify interactive authentication and clean exit.
 8. Move panes across all ten workspaces and verify background work continues.
-9. Exit with Alt+Shift+E and confirm the calling shell remains usable.
+9. Close the final pane and confirm the calling shell remains usable.
 
 Automated tests do not establish compatibility with every terminal or SSH
 client. Report the environments actually tested; never claim manual terminal

@@ -6,8 +6,6 @@ use serde::Deserialize;
 
 use crate::tiling::Orientation;
 
-const BUNDLED_SSH_SCRIPT: &str = include_str!("../scripts/ssh-hosts.py");
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -19,7 +17,6 @@ pub struct Config {
 impl Config {
     pub fn load() -> Result<Self> {
         let config_dir = config_directory();
-        install_bundled_ssh_script(&config_dir)?;
         let path = config_dir.join("config.toml");
         if !path.exists() {
             return Ok(Self::default_for(&config_dir));
@@ -46,7 +43,9 @@ impl Config {
             self.launcher.modes = LauncherConfig::default_for(config_dir).modes;
         }
         for mode in &mut self.launcher.modes {
-            mode.command = expand_tilde(&mode.command);
+            if let Some(command) = &mut mode.command {
+                *command = expand_tilde(command);
+            }
         }
     }
 
@@ -72,8 +71,19 @@ impl Config {
             anyhow::bail!("at least one launcher mode is required");
         }
         for mode in &self.launcher.modes {
-            if mode.name.trim().is_empty() || mode.command.as_os_str().is_empty() {
+            if mode.name.trim().is_empty()
+                || mode
+                    .command
+                    .as_ref()
+                    .is_some_and(|command| command.as_os_str().is_empty())
+            {
                 anyhow::bail!("launcher mode names and commands must not be empty");
+            }
+            if mode.command.is_some() == mode.builtin.is_some() {
+                anyhow::bail!(
+                    "launcher mode {} must specify exactly one of command or builtin",
+                    mode.name
+                );
             }
         }
         Ok(())
@@ -158,7 +168,7 @@ pub struct LauncherConfig {
 }
 
 impl LauncherConfig {
-    fn default_for(config_dir: &Path) -> Self {
+    fn default_for(_config_dir: &Path) -> Self {
         Self {
             default_mode: "ssh".to_owned(),
             width_percent: 60,
@@ -166,7 +176,8 @@ impl LauncherConfig {
             timeout_ms: 3_000,
             modes: vec![LauncherModeConfig {
                 name: "ssh".to_owned(),
-                command: config_dir.join("scripts/ssh-hosts.py"),
+                command: None,
+                builtin: Some(BuiltinMode::Ssh),
             }],
         }
     }
@@ -181,7 +192,14 @@ impl Default for LauncherConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct LauncherModeConfig {
     pub name: String,
-    pub command: PathBuf,
+    pub command: Option<PathBuf>,
+    pub builtin: Option<BuiltinMode>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinMode {
+    Ssh,
 }
 
 pub fn config_directory() -> PathBuf {
@@ -211,28 +229,42 @@ fn expand_tilde(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
-fn install_bundled_ssh_script(config_dir: &Path) -> Result<()> {
-    let scripts_dir = config_dir.join("scripts");
-    let script_path = scripts_dir.join("ssh-hosts.py");
-    if script_path.exists() {
-        return Ok(());
-    }
-    fs::create_dir_all(&scripts_dir)
-        .with_context(|| format!("failed to create {}", scripts_dir.display()))?;
-    fs::write(&script_path, BUNDLED_SSH_SCRIPT)
-        .with_context(|| format!("failed to install {}", script_path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("failed to make {} executable", script_path.display()))?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_ssh_is_default_and_script_modes_remain_compatible() {
+        let config = Config::default();
+        assert_eq!(config.launcher.modes[0].builtin, Some(BuiltinMode::Ssh));
+        assert!(config.launcher.modes[0].command.is_none());
+        assert!(config.validate().is_ok());
+        let config: Config = toml::from_str(
+            r#"
+[[launcher.modes]]
+name = "servers"
+builtin = "ssh"
+[[launcher.modes]]
+name = "custom"
+command = "/tmp/menu"
+"#,
+        )
+        .unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(
+            config.launcher.modes[1].command.as_deref(),
+            Some(Path::new("/tmp/menu"))
+        );
+        for fields in ["", "builtin = 'ssh'\ncommand = '/tmp/menu'", "command = ''"] {
+            let config: Config =
+                toml::from_str(&format!("[[launcher.modes]]\nname = 'test'\n{fields}")).unwrap();
+            assert!(config.validate().is_err());
+        }
+        assert!(
+            toml::from_str::<Config>("[[launcher.modes]]\nname = 'test'\nbuiltin = 'unknown'")
+                .is_err()
+        );
+    }
 
     #[test]
     fn validates_theme_colors_and_launcher_limits() {

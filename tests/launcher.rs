@@ -21,7 +21,8 @@ fn config(modes: Vec<(&str, PathBuf)>) -> LauncherConfig {
             .into_iter()
             .map(|(name, command)| LauncherModeConfig {
                 name: name.to_owned(),
-                command,
+                command: Some(command),
+                builtin: None,
             })
             .collect(),
     }

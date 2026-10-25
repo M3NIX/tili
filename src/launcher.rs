@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::config::LauncherConfig;
+use crate::config::{BuiltinMode, LauncherConfig};
 use crate::pty::CommandSpec;
 
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -23,16 +23,16 @@ const MAX_FIELD_BYTES: usize = 4_096;
 const MAX_ARGUMENTS: usize = 128;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LauncherEntry {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LauncherAction {
     OpenPane {
@@ -103,7 +103,8 @@ pub enum LauncherEvent {
 #[derive(Clone, Debug)]
 struct LauncherMode {
     name: String,
-    command: PathBuf,
+    command: Option<PathBuf>,
+    builtin: Option<BuiltinMode>,
 }
 
 pub struct Launcher {
@@ -134,6 +135,7 @@ impl Launcher {
             .map(|mode| LauncherMode {
                 name: mode.name.clone(),
                 command: mode.command.clone(),
+                builtin: mode.builtin,
             })
             .collect();
         let default_mode = modes
@@ -454,7 +456,15 @@ fn run_script(
     timeout: Duration,
     cancellation: &AtomicBool,
 ) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(&mode.command);
+    let mut command = match mode.builtin {
+        Some(BuiltinMode::Ssh) => {
+            let mut command =
+                Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
+            command.arg("--ssh-picker");
+            command
+        }
+        None => Command::new(mode.command.as_ref().ok_or("missing script command")?),
+    };
     match operation {
         ScriptOperation::List => {
             command.arg("list");

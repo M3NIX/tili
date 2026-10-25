@@ -14,8 +14,8 @@ over SSH—no daemon, graphical environment, or client-side companion required.
 
 ## Install
 
-Requires Linux and a stable Rust toolchain. The bundled SSH launcher also needs
-Python 3 and the system OpenSSH client.
+Requires Linux and a stable Rust toolchain. The native SSH launcher uses the
+system OpenSSH client; Python is not required.
 
 ```sh
 cargo install --path .
@@ -44,7 +44,6 @@ ssh -t user@server tili
 | Alt+Shift+1…9 / Alt+Shift+0 | Move pane to workspace |
 | Alt+D | Open launcher |
 | Alt+Shift+C | Reload configuration |
-| Alt+Shift+E | Exit with confirmation |
 
 Arrow keys also work for directional navigation. Closing the last pane in a
 workspace returns to the previous open workspace; closing the final pane exits.

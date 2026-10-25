@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,83 @@ fn missing_ssh_configuration_produces_an_empty_list() {
     let home = temporary_home("ssh-missing");
     assert!(list_aliases(&home).is_empty());
     let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn native_picker_protocol_runs_without_python_or_external_commands() {
+    let home = temporary_home("native-ssh-picker");
+    fs::create_dir_all(home.join(".ssh")).unwrap();
+    fs::write(
+        home.join(".ssh/config"),
+        "Host test1\n HostName test1.localhost.myydomain\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tili"))
+        .args(["--ssh-picker", "list"])
+        .env("HOME", &home)
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let entries = tili::launcher::parse_entries(&output.stdout).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].label, "test1 (test1.localhost.myydomain)");
+    let output = Command::new(env!("CARGO_BIN_EXE_tili"))
+        .args(["--ssh-picker", "select", &entries[0].id])
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        tili::launcher::parse_action(&output.stdout).unwrap(),
+        tili::ssh_hosts::select("test1").unwrap()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_tili"))
+        .args(["--ssh-picker", "select", "-oProxyCommand=bad"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn recursive_includes_fail_without_recursing_forever() {
+    let home = temporary_home("ssh-loop");
+    fs::create_dir_all(home.join(".ssh")).unwrap();
+    fs::write(home.join(".ssh/config"), "Include loop.conf\n").unwrap();
+    fs::write(home.join(".ssh/loop.conf"), "Include config\n").unwrap();
+    let error = tili::ssh_hosts::discover(&home.join(".ssh/config")).unwrap_err();
+    assert!(error.contains("cycle"));
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn parser_preserves_quotes_and_never_executes_match_commands() {
+    let home = temporary_home("ssh-quotes");
+    fs::create_dir_all(home.join(".ssh")).unwrap();
+    fs::write(
+        home.join(".ssh/config"),
+        format!(
+            r#"
+Host "quoted-host"
+ HostName "host#name.example"
+Host conditional
+ Match exec "touch {}/must-not-exist"
+ HostName ignored.example
+"#,
+            home.display()
+        ),
+    )
+    .unwrap();
+    let entries = list_entries(&home);
+    assert_eq!(entries[0]["label"], "conditional");
+    assert_eq!(entries[1]["label"], "quoted-host (host#name.example)");
+    assert!(!home.join("must-not-exist").exists());
+    fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
@@ -108,42 +185,31 @@ Host spaced
 
 #[test]
 fn select_returns_an_ssh_open_pane_action() {
-    let output = Command::new("python3")
-        .arg(script_path())
-        .args(["select", "production"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let action: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(action["action"], "open_pane");
-    assert_eq!(action["command"], "ssh");
-    assert_eq!(action["args"][0], "production");
+    assert_eq!(
+        tili::ssh_hosts::select("production").unwrap(),
+        tili::launcher::LauncherAction::OpenPane {
+            command: "ssh".to_owned(),
+            args: vec!["production".to_owned()],
+        }
+    );
+    for alias in ["", "-oProxyCommand=bad", "!excluded", "*", "host\nname"] {
+        assert!(tili::ssh_hosts::select(alias).is_err());
+    }
 }
 
-fn list_aliases(home: &PathBuf) -> Vec<String> {
+fn list_aliases(home: &Path) -> Vec<String> {
     list_entries(home)
         .into_iter()
         .map(|entry| entry["id"].as_str().unwrap().to_owned())
         .collect()
 }
 
-fn list_entries(home: &PathBuf) -> Vec<Value> {
-    let output = Command::new("python3")
-        .arg(script_path())
-        .arg("list")
-        .env("HOME", home)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    String::from_utf8(output.stdout)
+fn list_entries(home: &Path) -> Vec<Value> {
+    tili::ssh_hosts::discover(&home.join(".ssh/config"))
         .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .into_iter()
+        .map(|entry| serde_json::json!({"id": entry.id, "label": entry.label}))
         .collect()
-}
-
-fn script_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/ssh-hosts.py")
 }
 
 fn temporary_home(label: &str) -> PathBuf {

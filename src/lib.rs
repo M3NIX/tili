@@ -7,5 +7,6 @@ pub mod launcher;
 pub mod pane;
 pub mod pty;
 pub mod renderer;
+pub mod ssh_hosts;
 pub mod tiling;
 pub mod workspace;

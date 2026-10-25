@@ -10,6 +10,7 @@ anyhow = "1.0.100"
 arboard = { version = "3.7.0", default-features = false }
 crossterm = { version = "0.29.0", features = ["osc52"] }
 libc = "0.2.191"
+ssh2-config = { version = "0.9", default-features = false }
 nucleo-matcher = "0.3.1"
 portable-pty = "0.9.0"
 serde = { version = "1.0.229", features = ["derive"] }
