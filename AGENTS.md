@@ -33,7 +33,6 @@ For configurations from older versions, replace the SSH mode's
 Do not silently rewrite user configurations or delete previously installed scripts.
 Custom modes continue using `command = "/path/to/script"` and the unchanged JSON
 protocol. Each mode must specify exactly one of `builtin` or `command`.
-A deterministic layout preview is available with `cargo run --example layout`.
 
 ## Key bindings
 
