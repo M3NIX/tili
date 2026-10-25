@@ -118,9 +118,6 @@ impl App {
                 if self.input_mode == InputMode::Resize {
                     return self.handle_resize_key(key);
                 }
-                if self.input_mode == InputMode::ConfirmExit {
-                    return Ok(self.handle_exit_confirmation(key));
-                }
                 if self.input_mode == InputMode::ConfirmReplace {
                     return self.handle_replace_confirmation(key);
                 }
@@ -467,10 +464,6 @@ impl App {
             Action::SwitchWorkspace(workspace) => self.switch_workspace(workspace),
             Action::MoveToWorkspace(workspace) => self.move_to_workspace(workspace),
             Action::ReloadConfig => Ok(EventResult::ReloadConfig),
-            Action::RequestExit => {
-                self.input_mode = InputMode::ConfirmExit;
-                Ok(EventResult::Redraw)
-            }
         }
     }
 
@@ -497,22 +490,6 @@ impl App {
                 }
             }
             Some(ResizeModeAction::Resize(_)) | None => Ok(EventResult::Continue),
-        }
-    }
-
-    fn handle_exit_confirmation(&mut self, key: crossterm::event::KeyEvent) -> EventResult {
-        if matches!(key.kind, crossterm::event::KeyEventKind::Release) {
-            return EventResult::Continue;
-        }
-        match key.code {
-            crossterm::event::KeyCode::Char('y' | 'Y') | crossterm::event::KeyCode::Enter => {
-                EventResult::Exit
-            }
-            crossterm::event::KeyCode::Char('n' | 'N') | crossterm::event::KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
-                EventResult::Redraw
-            }
-            _ => EventResult::Continue,
         }
     }
 
@@ -796,7 +773,6 @@ impl App {
         match self.input_mode {
             InputMode::Normal => None,
             InputMode::Resize => Some(" RESIZE "),
-            InputMode::ConfirmExit => Some(" Exit tili? [y/N] "),
             InputMode::ConfirmReplace => Some(" Replace focused pane? [y/N] "),
         }
     }
@@ -807,7 +783,6 @@ enum InputMode {
     #[default]
     Normal,
     Resize,
-    ConfirmExit,
     ConfirmReplace,
 }
 

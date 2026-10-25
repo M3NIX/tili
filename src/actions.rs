@@ -17,7 +17,6 @@ pub enum Action {
     SwitchWorkspace(usize),
     MoveToWorkspace(usize),
     ReloadConfig,
-    RequestExit,
 }
 
 pub fn action_for_key(key: KeyEvent) -> Option<Action> {
@@ -43,7 +42,6 @@ pub fn action_for_key(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('l' | 'L') | KeyCode::Up, true) => Some(Action::Move(Direction::Up)),
         (KeyCode::Char(';' | ':') | KeyCode::Right, true) => Some(Action::Move(Direction::Right)),
         (KeyCode::Char('c' | 'C'), true) => Some(Action::ReloadConfig),
-        (KeyCode::Char('e' | 'E'), true) => Some(Action::RequestExit),
         (_, true) => None,
         (KeyCode::Enter, false) => Some(Action::OpenPane),
         (KeyCode::Backspace, false) => Some(Action::ClosePane),

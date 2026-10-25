@@ -8,6 +8,23 @@ fn alt(code: KeyCode) -> KeyEvent {
 }
 
 #[test]
+fn exit_confirmation_shortcut_is_not_bound() {
+    for character in ['e', 'E'] {
+        assert_eq!(
+            action_for_key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::ALT | KeyModifiers::SHIFT
+            )),
+            None
+        );
+    }
+    assert_eq!(
+        action_for_key(alt(KeyCode::Char('e'))),
+        Some(Action::ToggleSplit)
+    );
+}
+
+#[test]
 fn core_alt_bindings_follow_the_custom_i3_layout() {
     assert_eq!(action_for_key(alt(KeyCode::Enter)), Some(Action::OpenPane));
     assert_eq!(
