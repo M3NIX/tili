@@ -4,6 +4,13 @@ A lightweight, keyboard-driven terminal tiling manager inspired by i3.
 Run independent shells and interactive applications in tiled panes, locally or
 over SSH—no daemon, graphical environment, or client-side companion required.
 
+Unlike i3, which tiles graphical windows inside an X11/Wayland session, tili
+tiles PTY-backed terminal panes inside a single terminal window. It is for
+managing many shells and TUIs in one terminal, especially over SSH, without a
+multiplexer or desktop environment. For example, if you have to work on Windows
+and can only reach a Linux server through one predetermined SSH client, run tili
+there and still get the i3-style workflow.
+
 ## Features
 
 - i3-style splits, directional navigation, resizing, and fullscreen panes.
