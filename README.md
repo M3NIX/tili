@@ -32,21 +32,21 @@ ssh -t user@server tili
 
 ## Key bindings
 
-| Keys | Action |
-| --- | --- |
-| Alt+Enter | New shell pane |
-| Alt+T | New shell in the focused pane's working directory, when detectable |
-| Alt+Backspace | Close pane |
-| Alt+H / Alt+V | Next split: side by side / above and below |
-| Alt+E | Toggle split orientation |
-| Alt+J / K / L / Semicolon | Focus left / down / up / right |
-| Alt+Shift + direction | Move pane |
-| Alt+R | Resize mode; use the same directions, then Enter or Escape |
-| Alt+F | Toggle fullscreen |
-| Alt+1…9 / Alt+0 | Switch to workspace 1…9 / 10 |
-| Alt+Shift+1…9 / Alt+Shift+0 | Move pane to workspace |
-| Alt+D | Open launcher |
-| Alt+Shift+C | Reload configuration |
+| Keys                        | Action                                                             |
+| --------------------------- | ------------------------------------------------------------------ |
+| Alt+Enter                   | New shell pane                                                     |
+| Alt+T                       | New shell in the focused pane's working directory, when detectable |
+| Alt+Backspace               | Close pane                                                         |
+| Alt+H / Alt+V               | Next split: side by side / above and below                         |
+| Alt+E                       | Toggle split orientation                                           |
+| Alt+J / K / L / Semicolon   | Focus left / down / up / right                                     |
+| Alt+Shift + direction       | Move pane                                                          |
+| Alt+R                       | Resize mode; use the same directions, then Enter or Escape         |
+| Alt+F                       | Toggle fullscreen                                                  |
+| Alt+1…9 / Alt+0             | Switch to workspace 1…9 / 10                                       |
+| Alt+Shift+1…9 / Alt+Shift+0 | Move pane to workspace                                             |
+| Alt+D                       | Open launcher                                                      |
+| Alt+Shift+C                 | Reload configuration                                               |
 
 Arrow keys also work for directional navigation. Closing the last pane in a
 workspace returns to the previous open workspace; closing the final pane exits.
@@ -68,6 +68,7 @@ install -Dm755 scripts/example-menu.py ~/.config/tili/scripts/example-menu.py
 ```
 
 ```toml
+# ~/.config/tili/config.toml
 [[launcher.modes]]
 name = "examples"
 command = "~/.config/tili/scripts/example-menu.py"

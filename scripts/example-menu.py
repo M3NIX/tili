@@ -4,27 +4,33 @@
 import json
 import sys
 
-
-ENTRIES = {
-    "shell": {"id": "shell", "label": "Open shell"},
-    "top": {"id": "top", "label": "System monitor"},
+MENU = {
+    "shell": {
+        "label": "Open shell",
+        "action": {
+            "action": "open_pane",
+            "command": "/bin/bash",
+            "args": ["-i"],
+        },
+    },
+    "top": {
+        "label": "System monitor",
+        "action": {"action": "open_pane", "command": "top", "args": []},
+    },
 }
 
 
 def main(arguments: list[str]) -> int:
     if arguments == ["list"]:
-        for entry in ENTRIES.values():
+        for entry_id, entry in MENU.items():
+            entry = {"id": entry_id, "label": entry["label"]}
             print(json.dumps(entry, separators=(",", ":")))
         return 0
 
     if len(arguments) == 2 and arguments[0] == "select":
-        commands = {
-            "shell": {"action": "open_pane", "command": "/bin/sh", "args": []},
-            "top": {"action": "open_pane", "command": "top", "args": []},
-        }
-        action = commands.get(arguments[1])
-        if action is not None:
-            print(json.dumps(action, separators=(",", ":")))
+        entry = MENU.get(arguments[1])
+        if entry is not None:
+            print(json.dumps(entry["action"], separators=(",", ":")))
             return 0
 
     print("usage: example-menu.py list | select <id>", file=sys.stderr)
