@@ -11,12 +11,14 @@ use tili::launcher::{
 };
 use tili::pty::CommandSpec;
 
+const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn config(modes: Vec<(&str, PathBuf)>) -> LauncherConfig {
     LauncherConfig {
         default_mode: modes[0].0.to_owned(),
         width_percent: 60,
         max_results: 10,
-        timeout_ms: 1_000,
+        timeout_ms: 10_000,
         modes: modes
             .into_iter()
             .map(|(name, command)| LauncherModeConfig {
@@ -55,7 +57,10 @@ fn script_descendants_cannot_bypass_timeout_or_cancellation() {
                 r#"#!/usr/bin/env python3
 import os, pathlib, subprocess, time
 child = subprocess.Popen(["sleep", "30"])
-pathlib.Path({:?}).write_text(str(child.pid))
+pid_file = pathlib.Path({:?})
+temporary = pid_file.with_suffix('.tmp')
+temporary.write_text(str(child.pid))
+temporary.replace(pid_file)
 if {}: time.sleep(30)
 os._exit(0)
 "#,
@@ -64,17 +69,20 @@ os._exit(0)
             ),
         );
         let mut configuration = config(vec![("test", script)]);
-        configuration.timeout_ms = if cancel { 5000 } else { 300 };
+        configuration.timeout_ms = if cancel { 10_000 } else { 3_000 };
         let (events, receiver) = mpsc::sync_channel(128);
         let mut launcher = Launcher::new(&configuration);
         launcher.open(&events);
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + TEST_TIMEOUT;
         let pid = loop {
             if let Some(pid) = fs::read_to_string(&pid_file)
                 .ok()
                 .and_then(|pid| pid.parse::<u32>().ok())
             {
                 break pid;
+            }
+            if let Ok(event) = receiver.try_recv() {
+                panic!("request completed before publishing its child PID: {event:?}");
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -85,7 +93,7 @@ os._exit(0)
         if cancel {
             launcher.close();
         }
-        let event = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        let event = receiver.recv_timeout(TEST_TIMEOUT).unwrap();
         match event {
             LauncherEvent::Listed { result, .. } => {
                 assert!(result.unwrap_err().contains(if cancel {
@@ -96,15 +104,20 @@ os._exit(0)
             }
             event => panic!("unexpected event: {event:?}"),
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + TEST_TIMEOUT;
         loop {
             let status = fs::read_to_string(format!("/proc/{pid}/status"));
-            if status.as_ref().map_or(true, |status| {
-                status
-                    .lines()
-                    .any(|line| line.starts_with("State:") && line.contains('Z'))
-            }) {
-                break;
+            match status {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => panic!("could not inspect descendant {pid}: {error}"),
+                Ok(status)
+                    if status
+                        .lines()
+                        .any(|line| line.starts_with("State:") && line.contains('Z')) =>
+                {
+                    break;
+                }
+                Ok(_) => {}
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -155,7 +168,7 @@ fn script_output_limits_and_failure_status_are_reported() {
         let mut launcher = Launcher::new(&configuration);
         let (events, receiver) = mpsc::sync_channel(128);
         launcher.open(&events);
-        match receiver.recv_timeout(Duration::from_secs(6)).unwrap() {
+        match receiver.recv_timeout(TEST_TIMEOUT).unwrap() {
             LauncherEvent::Listed { result, .. } => assert!(result.unwrap_err().contains(expected)),
             event => panic!("unexpected event: {event:?}"),
         }
@@ -185,7 +198,7 @@ fn fuzzy_filtering_and_mode_switching_work() {
     let (events, receiver) = mpsc::sync_channel(128);
     let mut launcher = Launcher::new(&configuration);
     launcher.open(&events);
-    let request_id = match receiver.recv_timeout(Duration::from_secs(2)).unwrap() {
+    let request_id = match receiver.recv_timeout(TEST_TIMEOUT).unwrap() {
         LauncherEvent::Listed { request_id, .. } => request_id,
         event => panic!("unexpected launcher event: {event:?}"),
     };
@@ -213,6 +226,12 @@ fn fuzzy_filtering_and_mode_switching_work() {
     assert_eq!(launcher.mode_name(), "ssh");
     launcher.previous_mode(&events);
     assert_eq!(launcher.mode_name(), "docker");
+    launcher.close();
+    // Wait for all three superseded requests to finish process-group cleanup.
+    for _ in 0..3 {
+        let event = receiver.recv_timeout(TEST_TIMEOUT).unwrap();
+        assert!(launcher.handle_event(event).is_none());
+    }
 }
 
 #[test]
@@ -222,8 +241,7 @@ fn fuzzy_search_ignores_query_case_and_matches_hostname_labels() {
         let (events, receiver) = mpsc::sync_channel(128);
         let mut launcher = Launcher::new(&configuration);
         launcher.open(&events);
-        let LauncherEvent::Listed { request_id, .. } =
-            receiver.recv_timeout(Duration::from_secs(2)).unwrap()
+        let LauncherEvent::Listed { request_id, .. } = receiver.recv_timeout(TEST_TIMEOUT).unwrap()
         else {
             panic!("expected list result");
         };
@@ -275,7 +293,7 @@ else:
     let (events, receiver) = mpsc::sync_channel(128);
     let mut launcher = Launcher::new(&configuration);
     launcher.open(&events);
-    let listed = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    let listed = receiver.recv_timeout(TEST_TIMEOUT).unwrap();
     assert!(
         matches!(&listed, LauncherEvent::Listed { result: Ok(_), .. }),
         "list request failed: {listed:?}"
@@ -284,7 +302,7 @@ else:
     assert_eq!(launcher.visible_entries().len(), 1);
 
     launcher.select(&events);
-    let selected = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    let selected = receiver.recv_timeout(TEST_TIMEOUT).unwrap();
     assert!(
         matches!(&selected, LauncherEvent::Selected { result: Ok(_), .. }),
         "select request failed: {selected:?}"
@@ -299,7 +317,7 @@ fn navigation_keeps_selection_visible_in_small_viewports() {
     let (events, receiver) = mpsc::sync_channel(128);
     let mut launcher = Launcher::new(&configuration);
     launcher.open(&events);
-    let request_id = match receiver.recv_timeout(Duration::from_secs(2)).unwrap() {
+    let request_id = match receiver.recv_timeout(TEST_TIMEOUT).unwrap() {
         LauncherEvent::Listed { request_id, .. } => request_id,
         event => panic!("unexpected launcher event: {event:?}"),
     };
@@ -330,7 +348,7 @@ fn closing_launcher_discards_a_completed_selection() {
     let (events, receiver) = mpsc::sync_channel(128);
     let mut launcher = Launcher::new(&configuration);
     launcher.open(&events);
-    let request_id = match receiver.recv_timeout(Duration::from_secs(2)).unwrap() {
+    let request_id = match receiver.recv_timeout(TEST_TIMEOUT).unwrap() {
         LauncherEvent::Listed { request_id, .. } => request_id,
         event => panic!("unexpected launcher event: {event:?}"),
     };
@@ -339,7 +357,7 @@ fn closing_launcher_discards_a_completed_selection() {
         result: Ok(vec![entry("one", "One")]),
     });
     launcher.select(&events);
-    let request_id = match receiver.recv_timeout(Duration::from_secs(2)).unwrap() {
+    let request_id = match receiver.recv_timeout(TEST_TIMEOUT).unwrap() {
         LauncherEvent::Selected { request_id, .. } => request_id,
         event => panic!("unexpected launcher event: {event:?}"),
     };
@@ -371,7 +389,7 @@ fn background_commands_cannot_access_terminal_streams_and_report_failure() {
         events.clone(),
     );
     assert!(matches!(
-        receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        receiver.recv_timeout(TEST_TIMEOUT).unwrap(),
         LauncherEvent::Executed(Ok(()))
     ));
     execute_async(
@@ -379,7 +397,7 @@ fn background_commands_cannot_access_terminal_streams_and_report_failure() {
         events,
     );
     assert!(matches!(
-        receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        receiver.recv_timeout(TEST_TIMEOUT).unwrap(),
         LauncherEvent::Executed(Err(_))
     ));
 }
@@ -390,6 +408,6 @@ fn temporary_directory(label: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let path = std::env::temp_dir().join(format!("tili-{label}-{}-{nonce}", std::process::id()));
-    fs::create_dir_all(&path).unwrap();
+    fs::create_dir(&path).unwrap();
     path
 }

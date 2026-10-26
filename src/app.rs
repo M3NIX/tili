@@ -38,6 +38,7 @@ enum AppEvent {
 struct App {
     panes: HashMap<PaneId, Pane>,
     retain_failed_panes: HashSet<PaneId>,
+    pending_exits: HashSet<PaneId>,
     workspaces: Workspaces,
     selected_split: Orientation,
     resize_step: u16,
@@ -81,6 +82,7 @@ impl App {
         Ok(Self {
             panes,
             retain_failed_panes: HashSet::new(),
+            pending_exits: HashSet::new(),
             workspaces: Workspaces::new(initial),
             selected_split: config.general.default_split.into(),
             resize_step: config.general.resize_step,
@@ -609,6 +611,7 @@ impl App {
         self.layout_mut().replace_pane(old_pane_id, new_pane_id)?;
         self.panes.remove(&old_pane_id);
         self.retain_failed_panes.remove(&old_pane_id);
+        self.pending_exits.remove(&old_pane_id);
         if self.fullscreen() == Some(old_pane_id) {
             self.workspaces.active_mut().fullscreen = Some(new_pane_id);
         }
@@ -626,24 +629,19 @@ impl App {
         if !self.panes.contains_key(&pane_id) {
             return Ok(EventResult::Continue);
         }
-        let status = {
-            let pane = self
-                .panes
-                .get_mut(&pane_id)
-                .context("exited pane disappeared")?;
-            let mut status = pane.try_wait()?;
-            // PTY EOF and the child's wait status are reported by separate
-            // kernel paths. Give waitpid a short chance to observe an exit
-            // before recording the generic fallback below.
-            for _ in 0..10 {
-                if status.is_some() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(1));
-                status = pane.try_wait()?;
-            }
-            status
-        };
+        let pane = self
+            .panes
+            .get_mut(&pane_id)
+            .context("exited pane disappeared")?;
+        pane.mark_pty_closed();
+        let status = pane.try_wait()?;
+        // EOF drains the terminal output, but can precede the wait status.
+        // Poll retained panes without blocking input or inventing an exit status.
+        if self.retain_failed_panes.contains(&pane_id) && status.is_none() && fallback.is_none() {
+            self.pending_exits.insert(pane_id);
+            return Ok(EventResult::Continue);
+        }
+        self.pending_exits.remove(&pane_id);
         if !self.retain_failed_panes.contains(&pane_id)
             || status.as_ref().is_some_and(|status| status.success())
         {
@@ -659,6 +657,18 @@ impl App {
             .context("exited pane disappeared")?
             .mark_exited(&description);
         Ok(EventResult::Redraw)
+    }
+
+    fn poll_pending_exits(&mut self) -> Result<EventResult> {
+        let mut result = EventResult::Continue;
+        for pane_id in self.pending_exits.iter().copied().collect::<Vec<_>>() {
+            match self.handle_pane_exit(pane_id, None)? {
+                EventResult::Exit => return Ok(EventResult::Exit),
+                EventResult::Redraw => result = EventResult::Redraw,
+                _ => {}
+            }
+        }
+        Ok(result)
     }
 
     fn close_pane(&mut self, pane_id: PaneId) -> Result<EventResult> {
@@ -680,6 +690,7 @@ impl App {
         }
         self.panes.remove(&pane_id);
         self.retain_failed_panes.remove(&pane_id);
+        self.pending_exits.remove(&pane_id);
         if self.panes.is_empty() {
             return Ok(EventResult::Exit);
         }
@@ -839,7 +850,20 @@ fn event_loop(
     events: &Receiver<AppEvent>,
 ) -> Result<()> {
     loop {
-        let first = events.recv().context("application event channel closed")?;
+        match app.poll_pending_exits()? {
+            EventResult::Exit => return Ok(()),
+            EventResult::Redraw => render(app, renderer)?,
+            _ => {}
+        }
+        let first = if app.pending_exits.is_empty() {
+            events.recv().context("application event channel closed")?
+        } else {
+            match events.recv_timeout(Duration::from_millis(10)) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(error) => return Err(error).context("application event channel closed"),
+            }
+        };
         let started = std::time::Instant::now();
         let mut pending = Some(first);
         let mut redraw = false;
@@ -1159,11 +1183,46 @@ mod tests {
     use crate::config::{BuiltinMode, LauncherConfig, LauncherModeConfig};
     use crossterm::event::{MouseButton, MouseEvent};
 
+    const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+    fn test_config(path: &Path) -> Config {
+        let mut config = Config::default_for(path);
+        // State/geometry tests must not depend on the user's shell startup files.
+        config.general.shell = "/bin/cat".to_owned();
+        config
+    }
+
+    fn wait_for_app(
+        app: &mut App,
+        events: &Receiver<PtyEvent>,
+        description: &str,
+        ready: impl Fn(&App) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + TEST_TIMEOUT;
+        loop {
+            app.poll_pending_exits().unwrap();
+            if ready(app) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            match events.recv_timeout(Duration::from_millis(10)) {
+                Ok(event) => {
+                    app.handle_pty(event).unwrap();
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => panic!("waiting for {description}: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn failed_spawns_preserve_panes_focus_fullscreen_and_workspaces() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-app-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-app-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         let focused = app.layout().focused();
         app.workspaces.active_mut().fullscreen = focused;
@@ -1212,14 +1271,26 @@ mod tests {
     fn saturated_forwarders_stop_when_the_application_receiver_closes() {
         let (app_tx, app_rx) = mpsc::sync_channel(1);
         let (pty_tx, pty_rx) = mpsc::sync_channel(1);
+        app_tx
+            .send(AppEvent::Pty(PtyEvent::Eof(PaneId(0))))
+            .unwrap();
         let forwarder = spawn_pty_forwarder(pty_rx, app_tx).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let producer = thread::spawn(move || {
+            pty_tx
+                .send(PtyEvent::Output(PaneId(1), vec![0; 8192]))
+                .unwrap();
+            pty_tx
+                .send(PtyEvent::Output(PaneId(1), vec![0; 8192]))
+                .unwrap();
+            // The forwarder has taken the first message and is blocked on app_tx.
+            ready_tx.send(()).unwrap();
             while pty_tx
                 .send(PtyEvent::Output(PaneId(1), vec![0; 8192]))
                 .is_ok()
             {}
         });
-        thread::sleep(Duration::from_millis(20));
+        ready_rx.recv_timeout(TEST_TIMEOUT).unwrap();
         drop(app_rx);
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {
@@ -1227,7 +1298,7 @@ mod tests {
             producer.join().unwrap();
             done_tx.send(()).unwrap();
         });
-        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        done_rx.recv_timeout(TEST_TIMEOUT).unwrap();
     }
 
     #[test]
@@ -1312,7 +1383,7 @@ mod tests {
     fn launcher_open_action_creates_and_focuses_a_pane() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-app-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-app-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
 
         app.execute_launcher_action(LauncherAction::OpenPane {
@@ -1347,7 +1418,7 @@ mod tests {
                     },
                 ],
             },
-            ..Config::default_for(Path::new("/tmp/tili-arrow-test"))
+            ..test_config(Path::new("/tmp/tili-arrow-test"))
         };
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
@@ -1363,10 +1434,105 @@ mod tests {
     }
 
     #[test]
+    fn retained_pane_waits_for_status_after_pty_eof() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        for exit_code in [0, 255] {
+            let socket_path = std::env::temp_dir()
+                .join(format!("tili-exit-{}-{exit_code}.sock", std::process::id()));
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let (pty_tx, pty_rx) = mpsc::sync_channel(128);
+            let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
+            let mut app = App::new(
+                80,
+                24,
+                pty_tx,
+                launcher_tx,
+                &test_config(Path::new("/tmp/tili-test")),
+            )
+            .unwrap();
+            app.execute_launcher_action(LauncherAction::OpenPane {
+                command: "python3".to_owned(),
+                args: vec![
+                    "-c".to_owned(),
+                    r#"
+import os, socket, sys
+control = socket.socket(socket.AF_UNIX)
+control.connect(sys.argv[1])
+os.write(1, b'OUTPUT_BEFORE_EOF\n')
+for fd in range(3): os.close(fd)
+control.sendall(b'R')
+control.recv(1)
+os._exit(int(sys.argv[2]))
+"#
+                    .to_owned(),
+                    socket_path.to_str().unwrap().to_owned(),
+                    exit_code.to_string(),
+                ],
+            })
+            .unwrap();
+            let pane = app.layout().focused().unwrap();
+            let deadline = std::time::Instant::now() + TEST_TIMEOUT;
+            let mut control = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "child did not connect"
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            };
+            std::fs::remove_file(&socket_path).unwrap();
+            control.set_read_timeout(Some(TEST_TIMEOUT)).unwrap();
+            let mut ready = [0];
+            control.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, *b"R");
+            wait_for_app(&mut app, &pty_rx, "EOF before child exit", |app| {
+                app.pending_exits.contains(&pane)
+            });
+            assert!(!app.panes[&pane].has_exited());
+            app.handle_terminal(TerminalEvent::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+            app.handle_terminal(TerminalEvent::Paste("ignored".to_owned()))
+                .unwrap();
+            assert!(
+                app.panes[&pane]
+                    .screen()
+                    .contents()
+                    .contains("OUTPUT_BEFORE_EOF")
+            );
+            control.write_all(b"X").unwrap();
+            wait_for_app(&mut app, &pty_rx, "child exit status", |app| {
+                app.panes.get(&pane).is_none_or(|pane| pane.has_exited())
+            });
+            assert!(!app.pending_exits.contains(&pane));
+            if exit_code == 0 {
+                assert!(!app.panes.contains_key(&pane));
+            } else {
+                assert!(
+                    app.panes[&pane]
+                        .screen()
+                        .contents()
+                        .contains("Exited with code 255")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn failed_pane_keeps_its_output_while_successful_pane_closes() {
         let (pty_tx, pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-exit-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-exit-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         let cwd = app.cwd.clone();
 
@@ -1379,13 +1545,9 @@ mod tests {
         })
         .unwrap();
         let failed = app.layout().focused().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !app.panes.get(&failed).unwrap().has_exited() {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            assert!(!remaining.is_zero(), "timed out waiting for failed pane");
-            app.handle_pty(pty_rx.recv_timeout(remaining).unwrap())
-                .unwrap();
-        }
+        wait_for_app(&mut app, &pty_rx, "failed pane status", |app| {
+            app.panes.get(&failed).unwrap().has_exited()
+        });
         let screen = app.panes.get(&failed).unwrap().screen();
         let failed_screen = screen.contents();
         assert!(failed_screen.contains("SSH_TEST_FAILURE"));
@@ -1408,31 +1570,22 @@ mod tests {
         })
         .unwrap();
         let successful = app.layout().focused().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while app.panes.contains_key(&successful) {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            assert!(
-                !remaining.is_zero(),
-                "timed out waiting for successful pane"
-            );
-            app.handle_pty(pty_rx.recv_timeout(remaining).unwrap())
-                .unwrap();
-        }
+        wait_for_app(&mut app, &pty_rx, "successful pane closure", |app| {
+            !app.panes.contains_key(&successful)
+        });
         assert_eq!(app.layout().pane_count(), 1);
 
-        let shell = app.open_pane(app.shell.clone(), cwd).unwrap();
+        let shell = app
+            .open_pane(CommandSpec::new("/bin/sh", ["-s"]), cwd)
+            .unwrap();
         app.panes
             .get_mut(&shell)
             .unwrap()
             .write_input(b"false\nexit\n")
             .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while app.panes.contains_key(&shell) {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            assert!(!remaining.is_zero(), "timed out waiting for shell to exit");
-            app.handle_pty(pty_rx.recv_timeout(remaining).unwrap())
-                .unwrap();
-        }
+        wait_for_app(&mut app, &pty_rx, "shell closure", |app| {
+            !app.panes.contains_key(&shell)
+        });
         assert_eq!(app.layout().pane_count(), 1);
     }
 
@@ -1440,7 +1593,7 @@ mod tests {
     fn mouse_click_does_not_change_focus_until_pointer_motion_occurs() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-mouse-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-mouse-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         app.open_pane(app.shell.clone(), app.cwd.clone()).unwrap();
         app.dispatch(Action::Focus(crate::tiling::Direction::Left))
@@ -1474,7 +1627,7 @@ mod tests {
     fn closing_a_pane_resizes_the_surviving_pty_to_its_expanded_area() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-close-resize-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-close-resize-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         let second = app.open_pane(app.shell.clone(), app.cwd.clone()).unwrap();
         let narrow = app.panes[&PaneId(1)].screen().size().cols;
@@ -1491,7 +1644,7 @@ mod tests {
     fn mouse_drag_selects_text_and_queues_it_for_the_host_clipboard() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-selection-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-selection-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         app.panes
             .get_mut(&PaneId(1))
@@ -1542,7 +1695,7 @@ mod tests {
     fn mouse_drag_copies_text_from_alternate_screen() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-selection-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-selection-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         app.panes
             .get_mut(&PaneId(1))
@@ -1572,7 +1725,7 @@ mod tests {
     fn mouse_drag_across_rows_queues_multiline_text() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-selection-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-selection-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         app.panes
             .get_mut(&PaneId(1))
@@ -1601,7 +1754,7 @@ mod tests {
     fn mouse_drag_across_rows_queues_unicode_and_punctuation() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-selection-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-selection-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         app.panes
             .get_mut(&PaneId(1))
@@ -1633,7 +1786,7 @@ mod tests {
     fn empty_mouse_selection_is_discarded() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-selection-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-selection-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         app.panes
             .get_mut(&PaneId(1))
@@ -1662,7 +1815,7 @@ mod tests {
     fn mouse_drag_can_begin_in_padding_and_clamps_copy_to_text() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-selection-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-selection-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         app.panes
             .get_mut(&PaneId(1))
@@ -1692,7 +1845,7 @@ mod tests {
     fn consecutive_mouse_selections_replace_the_pending_clipboard_text() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-selection-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-selection-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         app.panes
             .get_mut(&PaneId(1))
@@ -1743,7 +1896,7 @@ mod tests {
     fn wheel_scrolls_the_pane_under_the_pointer_without_changing_focus() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-scroll-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-scroll-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         let second = app.open_pane(app.shell.clone(), app.cwd.clone()).unwrap();
         app.dispatch(Action::Focus(crate::tiling::Direction::Left))
@@ -1773,7 +1926,7 @@ mod tests {
     fn closing_last_workspace_pane_returns_then_final_close_exits() {
         let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
         let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
-        let config = Config::default_for(std::path::Path::new("/tmp/tili-close-test"));
+        let config = test_config(std::path::Path::new("/tmp/tili-close-test"));
         let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
         app.switch_workspace(1).unwrap();
         let second_workspace_pane = app.layout().focused().unwrap();

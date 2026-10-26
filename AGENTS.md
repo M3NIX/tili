@@ -315,8 +315,21 @@ Automated tests do not establish compatibility with every terminal or SSH
 client. Report the environments actually tested; never claim manual terminal
 or SSH validation without performing it.
 
+Process tests synchronize on output, completed events, or explicit readiness
+signals; a sleep is not evidence that a child started or a queue filled. PTY
+EOF and child exit status are separate observations. Wait for both when a test
+asserts an exit code. Test timeouts are failure bounds with room for CI process
+startup, not performance assertions. Publish fixture files atomically before
+reading or executing them. App state tests use a quiet `/bin/cat` process rather
+than the user's shell and startup configuration.
+
 ## Lifecycle and state invariants
 
+- Retained launcher panes whose PTY reaches EOF before the child exits remain
+  pending until the exit status becomes available. The event loop polls only
+  pending exits without blocking input; closing or replacing a pane removes
+  its pending exit. Tests use a separate control socket to hold the child alive
+  after EOF and release it explicitly for both successful and failed exits.
 - Reject launcher results after cancellation, closing, or an earlier completion.
 - Keep the selected result visible beyond the first page and in short terminals.
 - Disconnect background launcher commands from the application's terminal streams.

@@ -218,6 +218,6 @@ fn temporary_home(label: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let path = std::env::temp_dir().join(format!("tili-{label}-{}-{nonce}", std::process::id()));
-    fs::create_dir_all(&path).unwrap();
+    fs::create_dir(&path).unwrap();
     path
 }

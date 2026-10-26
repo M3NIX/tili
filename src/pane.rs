@@ -22,6 +22,7 @@ pub struct Pane {
     columns: u16,
     rows: u16,
     exited: bool,
+    pty_closed: bool,
 }
 
 impl Pane {
@@ -56,6 +57,7 @@ impl Pane {
             columns,
             rows,
             exited: false,
+            pty_closed: false,
         })
     }
 
@@ -85,7 +87,7 @@ impl Pane {
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) -> Result<()> {
-        if self.exited {
+        if self.exited || self.pty_closed {
             return Ok(());
         }
         self.terminal.screen_mut().scroll_reset();
@@ -93,7 +95,7 @@ impl Pane {
     }
 
     pub fn write_mouse(&mut self, event: MouseEvent) -> Result<bool> {
-        if self.exited {
+        if self.exited || self.pty_closed {
             return Ok(false);
         }
         let mut encoder = MouseEncoder::new();
@@ -186,7 +188,7 @@ impl Pane {
             rows,
             cols: columns,
         });
-        if in_band_resize {
+        if in_band_resize && !self.pty_closed {
             self.pty.write_all(
                 format!(
                     "\x1b[48;{rows};{columns};{};{}t",
@@ -213,6 +215,10 @@ impl Pane {
         self.pty
             .try_wait()
             .with_context(|| format!("failed to poll pane {}", self.id))
+    }
+
+    pub(crate) fn mark_pty_closed(&mut self) {
+        self.pty_closed = true;
     }
 
     pub fn mark_exited(&mut self, status: &str) {

@@ -7,6 +7,22 @@ use tili::pane::Pane;
 use tili::pty::{CommandSpec, PtyEvent, PtySession};
 use tili::tiling::PaneId;
 
+const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn wait_for_exit(session: &mut PtySession) -> portable_pty::ExitStatus {
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    loop {
+        if let Some(status) = session.try_wait().expect("failed to poll child") {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child did not exit after PTY EOF"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn selected_text(pane: &mut Pane, start: Position, end: Position) -> Option<String> {
     pane.selection_clear();
     assert!(pane.selection_start(start));
@@ -42,10 +58,9 @@ fn bounded_output_preserves_bytes_from_multiple_busy_ptys() {
         );
     }
     drop(event_tx);
-    std::thread::sleep(Duration::from_millis(50));
     let mut counts = [0; 4];
     let mut exited = [false; 4];
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + TEST_TIMEOUT;
     while exited.contains(&false) {
         match event_rx
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -61,12 +76,12 @@ fn bounded_output_preserves_bytes_from_multiple_busy_ptys() {
     }
     assert_eq!(counts, [524288; 4]);
     for session in &mut sessions {
-        assert!(session.try_wait().unwrap().unwrap().success());
+        assert!(wait_for_exit(session).success());
     }
 }
 
 #[test]
-fn saturated_pty_shuts_down_when_receiver_is_dropped() {
+fn busy_pty_shuts_down_when_receiver_is_dropped() {
     let (event_tx, event_rx) = mpsc::sync_channel(1);
     let session = PtySession::spawn(
         PaneId(1),
@@ -81,14 +96,16 @@ fn saturated_pty_shuts_down_when_receiver_is_dropped() {
         event_tx,
     )
     .unwrap();
-    std::thread::sleep(Duration::from_millis(30));
+    assert!(
+        matches!(event_rx.recv_timeout(TEST_TIMEOUT).unwrap(), PtyEvent::Output(PaneId(1), bytes) if !bytes.is_empty())
+    );
     drop(event_rx);
     let (done_tx, done_rx) = mpsc::channel();
     std::thread::spawn(move || {
         drop(session);
         done_tx.send(()).unwrap();
     });
-    done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    done_rx.recv_timeout(TEST_TIMEOUT).unwrap();
 }
 
 #[test]
@@ -97,7 +114,7 @@ fn shell_pty_accepts_input_parses_output_resizes_and_exits() {
     let (event_tx, event_rx) = mpsc::sync_channel(128);
     let mut session = PtySession::spawn(
         pane,
-        &CommandSpec::new("/bin/sh", std::iter::empty::<String>()),
+        &CommandSpec::new("/bin/sh", ["-s"]),
         None,
         PtySize {
             rows: 8,
@@ -115,10 +132,10 @@ fn shell_pty_accepts_input_parses_output_resizes_and_exits() {
     assert_eq!(size.rows, 19);
 
     session
-        .write_all(b"printf 'TILI_PTY_OK\\n'\nexit\n")
+        .write_all(b"printf 'TILI_%s\\n' 'PTY_OK'\nexit\n")
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + TEST_TIMEOUT;
     let mut parser = Parser::new(TerminalSize { rows: 8, cols: 40 }, 100);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -137,10 +154,7 @@ fn shell_pty_accepts_input_parses_output_resizes_and_exits() {
     }
 
     assert!(parser.screen().contents().contains("TILI_PTY_OK"));
-    let status = session
-        .try_wait()
-        .unwrap()
-        .expect("shell should have exited");
+    let status = wait_for_exit(&mut session);
     assert!(status.success());
 }
 
@@ -291,7 +305,7 @@ fn live_pane_observes_growth_after_being_shrunk() {
     let (event_tx, event_rx) = mpsc::sync_channel(128);
     let mut pane = Pane::spawn(
         PaneId(11),
-        &CommandSpec::new("/bin/sh", std::iter::empty::<String>()),
+        &CommandSpec::new("/bin/sh", ["-s"]),
         None,
         40,
         8,
@@ -304,15 +318,17 @@ fn live_pane_observes_growth_after_being_shrunk() {
     wait_for_pane_text(&mut pane, &event_rx, "SMALL:6 8");
 
     pane.resize(40, 10).unwrap();
-    pane.write_input(b"printf 'LARGE:'; stty size; printf 'EXPANDED_12345678901234567890\\n'\n")
-        .unwrap();
+    pane.write_input(
+        b"printf 'LARGE:'; stty size; printf 'EXPANDED_%s\\n' '12345678901234567890'\n",
+    )
+    .unwrap();
     wait_for_pane_text(&mut pane, &event_rx, "LARGE:10 40");
     wait_for_pane_text(&mut pane, &event_rx, "EXPANDED_12345678901234567890");
     assert_eq!(pane.screen().size(), TerminalSize { rows: 10, cols: 40 });
 }
 
 fn wait_for_pane_text(pane: &mut Pane, events: &mpsc::Receiver<PtyEvent>, expected: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + TEST_TIMEOUT;
     loop {
         if pane.screen().contents().contains(expected) {
             return;
@@ -391,7 +407,7 @@ fn multiple_pty_sessions_keep_output_and_processes_independent() {
     let (event_tx, event_rx) = mpsc::sync_channel(128);
     let mut first = PtySession::spawn(
         PaneId(1),
-        &CommandSpec::new("/bin/sh", std::iter::empty::<String>()),
+        &CommandSpec::new("/bin/sh", ["-s"]),
         None,
         PtySize::default(),
         event_tx.clone(),
@@ -399,19 +415,21 @@ fn multiple_pty_sessions_keep_output_and_processes_independent() {
     .unwrap();
     let mut second = PtySession::spawn(
         PaneId(2),
-        &CommandSpec::new("/bin/sh", std::iter::empty::<String>()),
+        &CommandSpec::new("/bin/sh", ["-s"]),
         None,
         PtySize::default(),
         event_tx,
     )
     .unwrap();
 
-    first.write_all(b"printf 'ONLY_FIRST\\n'\nexit\n").unwrap();
+    first
+        .write_all(b"printf 'ONLY_%s\\n' FIRST\nexit\n")
+        .unwrap();
     second
-        .write_all(b"printf 'ONLY_SECOND\\n'\nexit\n")
+        .write_all(b"printf 'ONLY_%s\\n' SECOND\nexit\n")
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + TEST_TIMEOUT;
     let mut first_output = Vec::new();
     let mut second_output = Vec::new();
     let mut eof_count = 0;
@@ -433,24 +451,8 @@ fn multiple_pty_sessions_keep_output_and_processes_independent() {
     assert!(!first_output.contains("ONLY_SECOND"));
     assert!(second_output.contains("ONLY_SECOND"));
     assert!(!second_output.contains("ONLY_FIRST"));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut first_status = None;
-    while first_status.is_none() && Instant::now() < deadline {
-        first_status = first.try_wait().unwrap();
-        if first_status.is_none() {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    assert!(first_status.unwrap().success());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut second_status = None;
-    while second_status.is_none() && Instant::now() < deadline {
-        second_status = second.try_wait().unwrap();
-        if second_status.is_none() {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    assert!(second_status.unwrap().success());
+    assert!(wait_for_exit(&mut first).success());
+    assert!(wait_for_exit(&mut second).success());
 }
 
 #[cfg(target_os = "linux")]
@@ -459,7 +461,7 @@ fn focused_process_working_directory_is_discovered_from_proc() {
     let (event_tx, _event_rx) = mpsc::sync_channel(128);
     let mut session = PtySession::spawn(
         PaneId(9),
-        &CommandSpec::new("/bin/sh", std::iter::empty::<String>()),
+        &CommandSpec::new("/bin/sh", ["-s"]),
         Some(std::path::Path::new("/tmp")),
         PtySize::default(),
         event_tx,
