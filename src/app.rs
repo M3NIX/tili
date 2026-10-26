@@ -320,7 +320,9 @@ impl App {
         match event {
             PtyEvent::Output(pane_id, bytes) => {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
-                    pane.process_output(&bytes)?;
+                    if let Some(text) = pane.process_output(&bytes)? {
+                        self.pending_clipboard = Some(text);
+                    }
                     Ok(if self.layout().contains(pane_id) {
                         EventResult::Redraw
                     } else {

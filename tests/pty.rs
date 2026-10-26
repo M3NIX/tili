@@ -182,6 +182,81 @@ fn pane_reflows_existing_output_across_width_changes() {
 }
 
 #[test]
+fn pane_receives_osc52_clipboard_writes_from_a_child() {
+    let (event_tx, event_rx) = mpsc::sync_channel(128);
+    let mut pane = Pane::spawn(
+        PaneId(17),
+        &CommandSpec::new(
+            "/bin/sh",
+            ["-c", "printf '\\033]52;c;Y2hpbGQgY2xpcGJvYXJk\\007'"],
+        ),
+        None,
+        30,
+        6,
+        event_tx,
+    )
+    .unwrap();
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    let mut clipboard = None;
+    while clipboard.is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for OSC 52 output");
+        match event_rx.recv_timeout(remaining).unwrap() {
+            PtyEvent::Output(_, bytes) => clipboard = pane.process_output(&bytes).unwrap(),
+            PtyEvent::Eof(_) => {}
+            PtyEvent::ReadError(_, error) => panic!("PTY failed: {error}"),
+        }
+    }
+    assert_eq!(clipboard.as_deref(), Some("child clipboard"));
+}
+
+#[test]
+fn pane_handles_split_and_multiple_osc52_requests() {
+    let (event_tx, _event_rx) = mpsc::sync_channel(128);
+    let mut pane = Pane::spawn(
+        PaneId(18),
+        &CommandSpec::new("/bin/cat", std::iter::empty::<String>()),
+        None,
+        30,
+        6,
+        event_tx,
+    )
+    .unwrap();
+    let first = b"normal\n\x1b]52;c;Zmlyc3Q=";
+    assert_eq!(pane.process_output(first).unwrap(), None);
+    assert_eq!(
+        pane.process_output(b"\x07\x1b]52;c;c2Vjb25k\x07")
+            .unwrap()
+            .as_deref(),
+        Some("second")
+    );
+    assert!(pane.screen().contents().contains("normal"));
+}
+
+#[test]
+fn pane_ignores_invalid_non_clipboard_and_oversized_osc52_requests() {
+    let (event_tx, _event_rx) = mpsc::sync_channel(128);
+    let mut pane = Pane::spawn(
+        PaneId(19),
+        &CommandSpec::new("/bin/cat", std::iter::empty::<String>()),
+        None,
+        30,
+        6,
+        event_tx,
+    )
+    .unwrap();
+    assert_eq!(
+        pane.process_output(b"\x1b]52;p;Y29uZmlkZW50aWFs\x07")
+            .unwrap(),
+        None
+    );
+    assert_eq!(pane.process_output(b"\x1b]52;c;%%%%\x07").unwrap(), None);
+    assert_eq!(pane.process_output(b"\x1b]52;c;\xff\x07").unwrap(), None);
+    let oversized = format!("\x1b]52;c;{}\x07", "A".repeat(70_000));
+    assert_eq!(pane.process_output(oversized.as_bytes()).unwrap(), None);
+}
+
+#[test]
 fn pane_selection_uses_terminal_emulator_spacing_and_rejects_empty_ranges() {
     let (event_tx, _event_rx) = mpsc::sync_channel(128);
     let mut pane = Pane::spawn(

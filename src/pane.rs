@@ -8,7 +8,8 @@ use crossterm::event::MouseEvent;
 use tastty_core::host_reply::auto_reply_bytes;
 use tastty_core::screen::SelectionMode;
 use tastty_core::{
-    HostProfile, MouseEncoder, Parser, Position, Screen, TerminalMode, TerminalSize,
+    ClipboardTarget, HostProfile, MouseEncoder, Parser, Position, Screen, TerminalMode,
+    TerminalSize,
 };
 
 use crate::pty::{CommandSpec, PtyEvent, PtySession, pty_size};
@@ -65,9 +66,21 @@ impl Pane {
         self.id
     }
 
-    pub fn process_output(&mut self, bytes: &[u8]) -> Result<()> {
+    /// Process terminal output and return clipboard text requested by the
+    /// application, if any. The parser owns OSC 52 framing, base64 decoding,
+    /// and resource limits; only valid UTF-8 writes to the normal clipboard
+    /// target are exposed to the application layer.
+    pub fn process_output(&mut self, bytes: &[u8]) -> Result<Option<String>> {
         self.terminal.process(bytes);
+        let mut clipboard = None;
         for event in self.terminal.screen_mut().drain_events() {
+            if let tastty_core::ScreenEvent::ClipboardWrite { targets, data } = &event
+                && targets.contains(&ClipboardTarget::Clipboard)
+                && let Ok(text) = std::str::from_utf8(data)
+                && !text.is_empty()
+            {
+                clipboard = Some(text.to_owned());
+            }
             // The host's inherited defaults are unknown. Do not let the reply
             // encoder misreport Color::Default as black.
             if matches!(
@@ -83,7 +96,7 @@ impl Pane {
                 self.pty.write_all(&reply)?;
             }
         }
-        Ok(())
+        Ok(clipboard)
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) -> Result<()> {
