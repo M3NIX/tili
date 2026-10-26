@@ -142,13 +142,13 @@ impl TerminalRenderer {
             .iter()
             .filter(|geometry| focused != Some(geometry.pane))
         {
-            canvas.draw_border(geometry.rect, self.unfocused_border);
+            canvas.draw_border(geometry.rect, self.unfocused_border, Color::Reset);
         }
         if let Some(geometry) = layout
             .iter()
             .find(|geometry| focused == Some(geometry.pane))
         {
-            canvas.draw_border(geometry.rect, self.focused_border);
+            canvas.draw_border(geometry.rect, self.focused_border, Color::Reset);
         }
         if let Some(orientation) = overlays.split_orientation
             && let Some(geometry) = layout
@@ -337,24 +337,24 @@ impl Canvas {
         }
     }
 
-    fn draw_border(&mut self, rect: Rect, color: Color) {
+    fn draw_border(&mut self, rect: Rect, color: Color, background: Color) {
         if rect.width == 0 || rect.height == 0 {
             return;
         }
         let right = rect.x.saturating_add(rect.width.saturating_sub(1));
         let bottom = rect.y.saturating_add(rect.height.saturating_sub(1));
         for x in rect.x..=right {
-            self.set(x, rect.y, Self::styled_cell("─", color, BACKGROUND));
-            self.set(x, bottom, Self::styled_cell("─", color, BACKGROUND));
+            self.set(x, rect.y, Self::styled_cell("─", color, background));
+            self.set(x, bottom, Self::styled_cell("─", color, background));
         }
         for y in rect.y..=bottom {
-            self.set(rect.x, y, Self::styled_cell("│", color, BACKGROUND));
-            self.set(right, y, Self::styled_cell("│", color, BACKGROUND));
+            self.set(rect.x, y, Self::styled_cell("│", color, background));
+            self.set(right, y, Self::styled_cell("│", color, background));
         }
-        self.set(rect.x, rect.y, Self::styled_cell("┌", color, BACKGROUND));
-        self.set(right, rect.y, Self::styled_cell("┐", color, BACKGROUND));
-        self.set(rect.x, bottom, Self::styled_cell("└", color, BACKGROUND));
-        self.set(right, bottom, Self::styled_cell("┘", color, BACKGROUND));
+        self.set(rect.x, rect.y, Self::styled_cell("┌", color, background));
+        self.set(right, rect.y, Self::styled_cell("┐", color, background));
+        self.set(rect.x, bottom, Self::styled_cell("└", color, background));
+        self.set(right, bottom, Self::styled_cell("┘", color, background));
     }
 
     fn draw_pane_contents(&mut self, pane: &Pane, rect: Rect) {
@@ -436,7 +436,7 @@ impl Canvas {
                     self.set(
                         right,
                         y,
-                        Self::styled_cell("│", SPLIT_INDICATOR, BACKGROUND),
+                        Self::styled_cell("│", SPLIT_INDICATOR, Color::Reset),
                     );
                 }
             }
@@ -445,7 +445,7 @@ impl Canvas {
                     self.set(
                         x,
                         bottom,
-                        Self::styled_cell("─", SPLIT_INDICATOR, BACKGROUND),
+                        Self::styled_cell("─", SPLIT_INDICATOR, Color::Reset),
                     );
                 }
             }
@@ -541,7 +541,7 @@ impl Canvas {
             height,
         );
         self.fill_rect(rect, BACKGROUND);
-        self.draw_border(rect, SELECTION);
+        self.draw_border(rect, SELECTION, BACKGROUND);
         let inner_width = usize::from(rect.width.saturating_sub(2));
         self.draw_text(
             rect.x.saturating_add(1),
@@ -1064,25 +1064,42 @@ mod tests {
     }
 
     #[test]
+    fn pane_borders_inherit_background_while_overlay_borders_keep_theirs() {
+        for background in [Color::Reset, BACKGROUND] {
+            let mut canvas = Canvas::new(4, 3);
+            canvas.draw_border(Rect::new(0, 0, 4, 3), FOCUSED_BORDER, background);
+            for cell in canvas.cells.iter().filter(|cell| cell.text != " ") {
+                assert_eq!(cell.foreground, FOCUSED_BORDER);
+                assert_eq!(cell.background, background);
+                if background == Color::Reset {
+                    assert!(emitted(cell).contains("\x1b[49m"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn split_indicator_highlights_the_edge_where_the_new_pane_will_open() {
         let rect = Rect::new(2, 1, 5, 4);
         let mut horizontal = Canvas::new(10, 8);
-        horizontal.draw_border(rect, FOCUSED_BORDER);
+        horizontal.draw_border(rect, FOCUSED_BORDER, Color::Reset);
         horizontal.draw_split_indicator(rect, Orientation::Horizontal);
         let right_edge = usize::from(2_u16 + 5 - 1) + usize::from(10_u16) * usize::from(2_u16);
         assert_eq!(horizontal.cells[right_edge].foreground, SPLIT_INDICATOR);
         assert_eq!(horizontal.cells[right_edge].text, "│");
+        assert_eq!(horizontal.cells[right_edge].background, Color::Reset);
         assert_eq!(horizontal.cells[16].foreground, FOCUSED_BORDER);
         assert_eq!(horizontal.cells[16].text, "┐");
         assert_eq!(horizontal.cells[46].foreground, FOCUSED_BORDER);
         assert_eq!(horizontal.cells[46].text, "┘");
 
         let mut vertical = Canvas::new(10, 8);
-        vertical.draw_border(rect, FOCUSED_BORDER);
+        vertical.draw_border(rect, FOCUSED_BORDER, Color::Reset);
         vertical.draw_split_indicator(rect, Orientation::Vertical);
         let bottom_edge = usize::from(3_u16) + usize::from(10_u16) * usize::from(1_u16 + 4 - 1);
         assert_eq!(vertical.cells[bottom_edge].foreground, SPLIT_INDICATOR);
         assert_eq!(vertical.cells[bottom_edge].text, "─");
+        assert_eq!(vertical.cells[bottom_edge].background, Color::Reset);
         assert_eq!(vertical.cells[42].foreground, FOCUSED_BORDER);
         assert_eq!(vertical.cells[42].text, "└");
         assert_eq!(vertical.cells[46].foreground, FOCUSED_BORDER);
