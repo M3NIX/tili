@@ -108,7 +108,13 @@ os._exit(0)
         loop {
             let status = fs::read_to_string(format!("/proc/{pid}/status"));
             match status {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                // The process can disappear after opening its procfs status file.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(libc::ESRCH) =>
+                {
+                    break;
+                }
                 Err(error) => panic!("could not inspect descendant {pid}: {error}"),
                 Ok(status)
                     if status

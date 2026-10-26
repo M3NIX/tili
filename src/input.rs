@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use tastty_core::{KeyEncoder, Screen};
 
-pub fn encode_key(key: KeyEvent, application_cursor: bool) -> Option<Vec<u8>> {
+pub fn encode_key(key: KeyEvent, screen: &Screen) -> Option<Vec<u8>> {
     if matches!(key.kind, KeyEventKind::Release) {
         return None;
     }
@@ -23,24 +24,20 @@ pub fn encode_key(key: KeyEvent, application_cursor: bool) -> Option<Vec<u8>> {
         KeyCode::Tab => bytes.push(b'\t'),
         KeyCode::BackTab => bytes.extend_from_slice(b"\x1b[Z"),
         KeyCode::Esc => bytes.push(0x1b),
-        KeyCode::Left => bytes.extend_from_slice(cursor_sequence(b'D', application_cursor)),
-        KeyCode::Right => bytes.extend_from_slice(cursor_sequence(b'C', application_cursor)),
-        KeyCode::Up => bytes.extend_from_slice(cursor_sequence(b'A', application_cursor)),
-        KeyCode::Down => bytes.extend_from_slice(cursor_sequence(b'B', application_cursor)),
-        KeyCode::Home => bytes.extend_from_slice(if application_cursor {
-            b"\x1bOH"
-        } else {
-            b"\x1b[H"
-        }),
-        KeyCode::End => bytes.extend_from_slice(if application_cursor {
-            b"\x1bOF"
-        } else {
-            b"\x1b[F"
-        }),
-        KeyCode::Insert => bytes.extend_from_slice(b"\x1b[2~"),
-        KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
-        KeyCode::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
-        KeyCode::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
+        KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::Insert
+        | KeyCode::Delete
+        | KeyCode::PageUp
+        | KeyCode::PageDown => {
+            let mut encoder = KeyEncoder::new();
+            encoder.sync(screen);
+            return encoder.encode_key(&key.into());
+        }
         KeyCode::F(number) => bytes.extend_from_slice(function_key_sequence(number)?),
         KeyCode::Null => bytes.push(0),
         KeyCode::CapsLock
@@ -81,20 +78,6 @@ fn control_byte(character: char) -> Option<u8> {
         '_' | '7' => Some(0x1f),
         '?' | '8' => Some(0x7f),
         _ => None,
-    }
-}
-
-fn cursor_sequence(final_byte: u8, application_cursor: bool) -> &'static [u8] {
-    match (final_byte, application_cursor) {
-        (b'A', false) => b"\x1b[A",
-        (b'B', false) => b"\x1b[B",
-        (b'C', false) => b"\x1b[C",
-        (b'D', false) => b"\x1b[D",
-        (b'A', true) => b"\x1bOA",
-        (b'B', true) => b"\x1bOB",
-        (b'C', true) => b"\x1bOC",
-        (b'D', true) => b"\x1bOD",
-        _ => unreachable!("cursor sequence called with an unsupported final byte"),
     }
 }
 

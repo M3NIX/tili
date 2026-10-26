@@ -135,9 +135,7 @@ impl App {
                 let Some(pane) = self.panes.get_mut(&focused) else {
                     return Ok(EventResult::Exit);
                 };
-                if let Some(bytes) =
-                    encode_key(key, pane.screen().mode(TerminalMode::ApplicationCursor))
-                {
+                if let Some(bytes) = encode_key(key, pane.screen()) {
                     pane.write_input(&bytes)?;
                 }
                 Ok(EventResult::Continue)
