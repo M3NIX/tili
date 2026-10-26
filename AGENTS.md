@@ -225,6 +225,31 @@ Parent-container focus, stacking, and tabbed layouts are deliberately deferred.
 Supporting them correctly requires a broader container model that conflicts
 with the project's minimal binary tiling design.
 
+## Pane colors
+
+Pane contents inherit host default foreground/background through SGR 39/49 and
+preserve ANSI indices 0–255. Explicit truecolor remains RGB. UI colors (including
+selection) stay explicit. Inverse cells emit SGR 7 after resolving colors in their
+original roles; DEC reverse video combines with cell inverse using XOR.
+
+Each parser starts with symbolic default foreground/background. OSC 10/11 values
+are rendered as pane-local RGB; OSC 110/111 and RIS restore inheritance. Palette
+entries whose resolved values differ from tastty-core's baseline are rendered as
+RGB, so OSC 4 changes never modify the host palette. OSC 104 and RIS restore index
+passthrough. The baseline is obtained from tastty-core rather than duplicated.
+
+Limitations of tastty-core 0.1.1: its screen exposes resolved palette values, not
+an override mask. An explicit OSC 4 assignment equal to the built-in xterm value
+is therefore treated as an inherited index, even if the host palette differs.
+Tracking only palette events cannot reliably fix this because RIS replaces the
+screen and pending events without a distinct palette-reset event. OSC 4 currently
+processes only the first index/color pair in a single command. No host palette
+queries are performed: palette query replies use the emulator's palette, and
+queries for unknown inherited default colors are left unanswered rather than
+misreported as black. Applications choosing RGB themes from such queries may
+therefore differ from direct execution. Truecolor, indexed colors, bold/dim, and
+inverse ultimately depend on host terminal support and policy.
+
 ## Terminal protocol limitations
 
 Legacy terminals encode Alt as an Escape prefix and may not distinguish every

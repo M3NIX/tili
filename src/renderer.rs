@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Stdout, Write, stdout};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -23,6 +24,7 @@ use crate::pane::Pane;
 use crate::tiling::{Orientation, PaneGeometry, PaneId, Rect};
 use crate::workspace::WORKSPACE_COUNT;
 
+// These colors belong to tili UI, not terminal pane contents.
 const BACKGROUND: Color = Color::Rgb {
     r: 0x1d,
     g: 0x1f,
@@ -191,7 +193,10 @@ impl TerminalRenderer {
     fn draw_changes(&mut self, canvas: &Canvas) -> Result<()> {
         let resized = self.previous_size != (canvas.width, canvas.height);
         if resized {
-            self.output.queue(Clear(ClearType::All))?;
+            self.output
+                .queue(SetAttribute(Attribute::Reset))?
+                .queue(ResetColor)?
+                .queue(Clear(ClearType::All))?;
             self.previous = vec![RenderCell::default(); canvas.cells.len()];
             self.previous_size = (canvas.width, canvas.height);
         }
@@ -208,24 +213,7 @@ impl TerminalRenderer {
             }
             let x = u16::try_from(index % width).unwrap_or(u16::MAX);
             let y = u16::try_from(index / width).unwrap_or(u16::MAX);
-            self.output
-                .queue(MoveTo(x, y))?
-                .queue(SetAttribute(Attribute::Reset))?
-                .queue(SetForegroundColor(cell.foreground))?
-                .queue(SetBackgroundColor(cell.background))?;
-            if cell.bold {
-                self.output.queue(SetAttribute(Attribute::Bold))?;
-            }
-            if cell.dim {
-                self.output.queue(SetAttribute(Attribute::Dim))?;
-            }
-            if cell.italic {
-                self.output.queue(SetAttribute(Attribute::Italic))?;
-            }
-            if cell.underline {
-                self.output.queue(SetAttribute(Attribute::Underlined))?;
-            }
-            self.output.queue(Print(&cell.text))?;
+            cell.write_to(&mut self.output, x, y)?;
         }
         self.previous.clone_from(&canvas.cells);
         Ok(())
@@ -256,6 +244,7 @@ struct RenderCell {
     italic: bool,
     underline: bool,
     wide_continuation: bool,
+    inverse: bool,
 }
 
 impl Default for RenderCell {
@@ -269,7 +258,31 @@ impl Default for RenderCell {
             italic: false,
             underline: false,
             wide_continuation: false,
+            inverse: false,
         }
+    }
+}
+
+impl RenderCell {
+    fn write_to(&self, output: &mut impl Write, x: u16, y: u16) -> std::io::Result<()> {
+        output
+            .queue(MoveTo(x, y))?
+            .queue(SetAttribute(Attribute::Reset))?
+            .queue(SetForegroundColor(self.foreground))?
+            .queue(SetBackgroundColor(self.background))?;
+        for (enabled, attribute) in [
+            (self.bold, Attribute::Bold),
+            (self.dim, Attribute::Dim),
+            (self.italic, Attribute::Italic),
+            (self.underline, Attribute::Underlined),
+            (self.inverse, Attribute::Reverse),
+        ] {
+            if enabled {
+                output.queue(SetAttribute(attribute))?;
+            }
+        }
+        output.queue(Print(&self.text))?;
+        Ok(())
     }
 }
 
@@ -331,7 +344,19 @@ impl Canvas {
         if visible_columns == 0 || visible_rows == 0 {
             return;
         }
-        let screen = pane.screen();
+        self.draw_screen(pane.screen(), rect, |position| {
+            pane.selection_contains(position)
+        });
+    }
+
+    fn draw_screen(
+        &mut self,
+        screen: &tastty_core::Screen,
+        rect: Rect,
+        selected: impl Fn(Position) -> bool,
+    ) {
+        let visible_columns = rect.width.saturating_sub(2);
+        let visible_rows = rect.height.saturating_sub(2);
         let size = screen.size();
         let rows = visible_rows.min(size.rows);
         let columns = visible_columns.min(size.cols);
@@ -341,24 +366,20 @@ impl Canvas {
                     continue;
                 };
                 let attrs = cell.attrs();
-                let inverse = attrs.inverse() ^ screen.mode(TerminalMode::ReverseVideo);
-                let (foreground, background) = if inverse {
-                    (attrs.bg_color, attrs.fg_color)
-                } else {
-                    (attrs.fg_color, attrs.bg_color)
-                };
-                let (foreground, background) = if cell.has_contents()
+                let selected = cell.has_contents()
                     && cell
                         .contents()
                         .chars()
                         .any(|character| !character.is_whitespace())
-                    && pane.selection_contains(Position::new(row, column))
-                {
+                    && selected(Position::new(row, column));
+                let inverse =
+                    !selected && (attrs.inverse() ^ screen.mode(TerminalMode::ReverseVideo));
+                let (foreground, background) = if selected {
                     (FOREGROUND, SELECTION)
                 } else {
                     (
-                        map_color(screen, foreground, ColorRole::Foreground, FOREGROUND),
-                        map_color(screen, background, ColorRole::Background, BACKGROUND),
+                        map_color(screen, attrs.fg_color, ColorRole::Foreground),
+                        map_color(screen, attrs.bg_color, ColorRole::Background),
                     )
                 };
                 self.set(
@@ -377,6 +398,7 @@ impl Canvas {
                         italic: attrs.italic(),
                         underline: attrs.underline(),
                         wide_continuation: cell.is_wide_continuation(),
+                        inverse,
                     },
                 );
             }
@@ -717,22 +739,41 @@ fn focused_cursor(
     ))
 }
 
-fn map_color(
-    screen: &tastty_core::Screen,
-    color: tastty_core::Color,
-    role: ColorRole,
-    default: Color,
-) -> Color {
+// Keep the dependency's baseline palette rather than duplicating its xterm table.
+static BASE_PALETTE: LazyLock<[(u8, u8, u8); 256]> = LazyLock::new(|| {
+    let parser = tastty_core::Parser::new(tastty_core::TerminalSize { rows: 1, cols: 1 }, 0);
+    std::array::from_fn(|index| {
+        parser.screen().resolve_color(
+            tastty_core::Color::Index(index as u8),
+            ColorRole::Foreground,
+        )
+    })
+});
+
+fn map_color(screen: &tastty_core::Screen, color: tastty_core::Color, role: ColorRole) -> Color {
     match color {
-        tastty_core::Color::Default => default,
-        tastty_core::Color::Index(_) | tastty_core::Color::Rgb(_, _, _) => {
-            let (red, green, blue) = screen.resolve_color(color, role);
-            Color::Rgb {
-                r: red,
-                g: green,
-                b: blue,
+        tastty_core::Color::Default => {
+            let default = match role {
+                ColorRole::Foreground => screen.default_fg(),
+                ColorRole::Background => screen.default_bg(),
+                ColorRole::CursorColor => screen.default_cursor_color(),
+                _ => tastty_core::Color::Default,
+            };
+            if default == tastty_core::Color::Default {
+                Color::Reset
+            } else {
+                map_color(screen, default, role)
             }
         }
+        tastty_core::Color::Index(index) => {
+            let (r, g, b) = screen.resolve_color(color, role);
+            if (r, g, b) == BASE_PALETTE[usize::from(index)] {
+                Color::AnsiValue(index)
+            } else {
+                Color::Rgb { r, g, b }
+            }
+        }
+        tastty_core::Color::Rgb(r, g, b) => Color::Rgb { r, g, b },
     }
 }
 
@@ -757,6 +798,164 @@ fn parse_color(value: &str) -> Result<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terminal() -> tastty_core::Parser {
+        crossterm::style::force_color_output(true);
+        let mut profile = tastty_core::HostProfile::default();
+        profile.default_fg = tastty_core::Color::Default;
+        profile.default_bg = tastty_core::Color::Default;
+        tastty_core::Parser::with_profile(
+            tastty_core::TerminalSize { rows: 1, cols: 4 },
+            0,
+            std::sync::Arc::new(profile),
+        )
+    }
+
+    fn rendered(parser: &tastty_core::Parser, selected: bool) -> RenderCell {
+        let mut canvas = Canvas::new(6, 3);
+        canvas.draw_screen(parser.screen(), Rect::new(0, 0, 6, 3), |_| selected);
+        canvas.cells[7].clone()
+    }
+
+    fn emitted(cell: &RenderCell) -> String {
+        let mut output = Vec::new();
+        cell.write_to(&mut output, 0, 0).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn pane_defaults_and_all_palette_indices_use_host_attributes() {
+        let mut parser = terminal();
+        assert_eq!(
+            emitted(&rendered(&parser, false)),
+            "\x1b[1;1H\x1b[0m\x1b[39m\x1b[49m "
+        );
+        for index in 0..=255 {
+            parser.process(format!("\r\x1b[38;5;{index};48;5;{index}mX").as_bytes());
+            let cell = rendered(&parser, false);
+            assert_eq!(cell.foreground, Color::AnsiValue(index));
+            assert_eq!(cell.background, Color::AnsiValue(index));
+            assert_eq!(
+                emitted(&cell),
+                format!("\x1b[1;1H\x1b[0m\x1b[38;5;{index}m\x1b[48;5;{index}mX")
+            );
+        }
+    }
+
+    #[test]
+    fn truecolor_and_inverse_keep_original_color_roles() {
+        let mut parser = terminal();
+        parser.process(b"\x1b[1;2;3;4;7;38;2;1;2;3;48;2;4;5;6mX");
+        let cell = rendered(&parser, false);
+        assert_eq!(cell.foreground, Color::Rgb { r: 1, g: 2, b: 3 });
+        assert_eq!(cell.background, Color::Rgb { r: 4, g: 5, b: 6 });
+        assert!(emitted(&cell).ends_with("\x1b[2m\x1b[3m\x1b[4m\x1b[7mX"));
+        parser.process(b"\x1b[?5h");
+        assert!(!rendered(&parser, false).inverse);
+        parser.process(b"\r\x1b[0mX");
+        let cell = rendered(&parser, false);
+        assert_eq!(emitted(&cell), "\x1b[1;1H\x1b[0m\x1b[39m\x1b[49m\x1b[7mX");
+        let selected = rendered(&parser, true);
+        assert_eq!(
+            (selected.foreground, selected.background),
+            (FOREGROUND, SELECTION)
+        );
+        assert!(!selected.inverse);
+    }
+
+    #[test]
+    fn palette_changes_are_local_and_resets_restore_passthrough() {
+        let mut parser = terminal();
+        let other = terminal();
+        parser.process(b"\x1b]4;1;#123456\x07\x1b]10;#abcdef\x07\x1b]11;#654321\x07X");
+        let defaults = rendered(&parser, false);
+        assert_eq!(
+            defaults.foreground,
+            Color::Rgb {
+                r: 0xab,
+                g: 0xcd,
+                b: 0xef
+            }
+        );
+        assert_eq!(
+            defaults.background,
+            Color::Rgb {
+                r: 0x65,
+                g: 0x43,
+                b: 0x21
+            }
+        );
+        parser.process(b"\r\x1b[31mX");
+        assert_eq!(
+            rendered(&parser, false).foreground,
+            Color::Rgb {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56
+            }
+        );
+        assert_eq!(
+            map_color(
+                other.screen(),
+                tastty_core::Color::Index(1),
+                ColorRole::Foreground
+            ),
+            Color::AnsiValue(1)
+        );
+        assert_eq!(rendered(&other, false).foreground, Color::Reset);
+        parser.process(b"\x1b[?1049h\x1b[31mX");
+        assert_eq!(
+            rendered(&parser, false).foreground,
+            Color::Rgb {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56
+            }
+        );
+        parser.process(b"\x1b[?1049l\x1b]104;1\x07\x1b]110\x07\x1b]111\x07");
+        assert_eq!(rendered(&parser, false).foreground, Color::AnsiValue(1));
+        assert_eq!(rendered(&parser, false).background, Color::Reset);
+        parser.process(b"\r\x1b[0mX");
+        assert_eq!(rendered(&parser, false).foreground, Color::Reset);
+        parser.process(b"\x1b]4;1;#123456\x07\x1b]104\x07");
+        assert_eq!(
+            map_color(
+                parser.screen(),
+                tastty_core::Color::Index(1),
+                ColorRole::Foreground
+            ),
+            Color::AnsiValue(1)
+        );
+        parser.process(b"\x1b]4;1;#123456\x07\x1b]10;#123456\x07\x1bc");
+        assert_eq!(rendered(&parser, false).foreground, Color::Reset);
+        assert_eq!(
+            map_color(
+                parser.screen(),
+                tastty_core::Color::Index(1),
+                ColorRole::Foreground
+            ),
+            Color::AnsiValue(1)
+        );
+    }
+
+    #[test]
+    fn adjacent_cells_reset_colors_and_attributes_after_ui_or_inverse() {
+        let mut parser = terminal();
+        parser.process(b"\x1b[1;7;31;44mX");
+        let mut output = Vec::new();
+        rendered(&parser, false)
+            .write_to(&mut output, 0, 0)
+            .unwrap();
+        Canvas::styled_cell("U", FOREGROUND, BACKGROUND)
+            .write_to(&mut output, 1, 0)
+            .unwrap();
+        rendered(&terminal(), false)
+            .write_to(&mut output, 2, 0)
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("\x1b[0m\x1b[38;2;197;200;198m\x1b[48;2;29;31;33mU"));
+        assert!(output.ends_with("\x1b[1;3H\x1b[0m\x1b[39m\x1b[49m "));
+    }
 
     #[test]
     fn fuzzy_highlights_preserve_selection_and_unicode_geometry() {

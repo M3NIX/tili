@@ -472,3 +472,28 @@ fn focused_process_working_directory_is_discovered_from_proc() {
     );
     session.write_all(b"exit\n").unwrap();
 }
+
+#[test]
+fn pane_defaults_inherit_until_changed_and_reset_by_application() {
+    use tastty_core::Color;
+
+    let (event_tx, _event_rx) = mpsc::sync_channel(128);
+    let mut pane = Pane::spawn(
+        PaneId(16),
+        &CommandSpec::new("/bin/cat", std::iter::empty::<String>()),
+        None,
+        20,
+        4,
+        event_tx,
+    )
+    .unwrap();
+    assert_eq!(pane.screen().default_fg(), Color::Default);
+    assert_eq!(pane.screen().default_bg(), Color::Default);
+    pane.process_output(b"\x1b]10;#123456\x07\x1b]11;#654321\x07")
+        .unwrap();
+    assert_eq!(pane.screen().default_fg(), Color::Rgb(0x12, 0x34, 0x56));
+    assert_eq!(pane.screen().default_bg(), Color::Rgb(0x65, 0x43, 0x21));
+    pane.process_output(b"\x1b]110\x07\x1b]111\x07").unwrap();
+    assert_eq!(pane.screen().default_fg(), Color::Default);
+    assert_eq!(pane.screen().default_bg(), Color::Default);
+}

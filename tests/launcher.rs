@@ -36,15 +36,22 @@ fn entry(id: &str, label: &str) -> LauncherEntry {
     }
 }
 
+fn write_executable_script(path: &std::path::Path, contents: &str) {
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, contents).unwrap();
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(temporary, path).unwrap();
+}
+
 #[test]
 fn script_descendants_cannot_bypass_timeout_or_cancellation() {
     for (cancel, keep_parent) in [(false, false), (true, false), (false, true), (true, true)] {
         let directory = temporary_directory("launcher-descendant");
         let script = directory.join("menu.py");
         let pid_file = directory.join("pid");
-        fs::write(
+        write_executable_script(
             &script,
-            format!(
+            &format!(
                 r#"#!/usr/bin/env python3
 import os, pathlib, subprocess, time
 child = subprocess.Popen(["sleep", "30"])
@@ -55,19 +62,26 @@ os._exit(0)
                 pid_file,
                 if keep_parent { "True" } else { "False" }
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut configuration = config(vec![("test", script)]);
         configuration.timeout_ms = if cancel { 5000 } else { 300 };
         let (events, receiver) = mpsc::sync_channel(128);
         let mut launcher = Launcher::new(&configuration);
         launcher.open(&events);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !pid_file.exists() && std::time::Instant::now() < deadline {
+        let pid = loop {
+            if let Some(pid) = fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|pid| pid.parse::<u32>().ok())
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "script did not publish its child PID"
+            );
             std::thread::sleep(Duration::from_millis(5));
-        }
-        let pid: u32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        };
         if cancel {
             launcher.close();
         }
@@ -135,8 +149,7 @@ fn script_output_limits_and_failure_status_are_reported() {
     ] {
         let directory = temporary_directory("launcher-errors");
         let script = directory.join("menu.py");
-        fs::write(&script, format!("#!/usr/bin/env python3\n{body}\n")).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&script, &format!("#!/usr/bin/env python3\n{body}\n"));
         let mut configuration = config(vec![("test", script)]);
         configuration.timeout_ms = 5000;
         let mut launcher = Launcher::new(&configuration);
@@ -246,7 +259,7 @@ fn fuzzy_search_ignores_query_case_and_matches_hostname_labels() {
 fn executes_list_and_select_protocol() {
     let directory = temporary_directory("launcher-protocol");
     let script = directory.join("menu.py");
-    fs::write(
+    write_executable_script(
         &script,
         r#"#!/usr/bin/env python3
 import json, sys
@@ -257,22 +270,27 @@ elif sys.argv[1:] == ["select", "one"]:
 else:
     raise SystemExit(2)
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-
+    );
     let configuration = config(vec![("test", script)]);
     let (events, receiver) = mpsc::sync_channel(128);
     let mut launcher = Launcher::new(&configuration);
     launcher.open(&events);
     let listed = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        matches!(&listed, LauncherEvent::Listed { result: Ok(_), .. }),
+        "list request failed: {listed:?}"
+    );
     assert!(launcher.handle_event(listed).is_none());
     assert_eq!(launcher.visible_entries().len(), 1);
 
     launcher.select(&events);
     let selected = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        matches!(&selected, LauncherEvent::Selected { result: Ok(_), .. }),
+        "select request failed: {selected:?}"
+    );
     assert_eq!(launcher.handle_event(selected), Some(LauncherAction::Close));
-    let _ = fs::remove_dir_all(directory);
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

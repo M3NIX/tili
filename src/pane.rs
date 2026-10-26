@@ -35,7 +35,10 @@ impl Pane {
     ) -> Result<Self> {
         let columns = columns.max(1);
         let rows = rows.max(1);
-        let host_profile = Arc::new(HostProfile::default());
+        let mut host_profile = HostProfile::default();
+        host_profile.default_fg = tastty_core::Color::Default;
+        host_profile.default_bg = tastty_core::Color::Default;
+        let host_profile = Arc::new(host_profile);
         let terminal = Parser::with_profile(
             TerminalSize {
                 rows,
@@ -63,6 +66,17 @@ impl Pane {
     pub fn process_output(&mut self, bytes: &[u8]) -> Result<()> {
         self.terminal.process(bytes);
         for event in self.terminal.screen_mut().drain_events() {
+            // The host's inherited defaults are unknown. Do not let the reply
+            // encoder misreport Color::Default as black.
+            if matches!(
+                event,
+                tastty_core::ScreenEvent::ColorQuery {
+                    color: tastty_core::Color::Default,
+                    ..
+                }
+            ) {
+                continue;
+            }
             if let Some(reply) = auto_reply_bytes(&event, &self.host_profile) {
                 self.pty.write_all(&reply)?;
             }
