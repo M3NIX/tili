@@ -626,11 +626,24 @@ impl App {
         if !self.panes.contains_key(&pane_id) {
             return Ok(EventResult::Continue);
         }
-        let status = self
-            .panes
-            .get_mut(&pane_id)
-            .context("exited pane disappeared")?
-            .try_wait()?;
+        let status = {
+            let pane = self
+                .panes
+                .get_mut(&pane_id)
+                .context("exited pane disappeared")?;
+            let mut status = pane.try_wait()?;
+            // PTY EOF and the child's wait status are reported by separate
+            // kernel paths. Give waitpid a short chance to observe an exit
+            // before recording the generic fallback below.
+            for _ in 0..10 {
+                if status.is_some() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+                status = pane.try_wait()?;
+            }
+            status
+        };
         if !self.retain_failed_panes.contains(&pane_id)
             || status.as_ref().is_some_and(|status| status.success())
         {

@@ -267,9 +267,7 @@ impl RenderCell {
     fn write_to(&self, output: &mut impl Write, x: u16, y: u16) -> std::io::Result<()> {
         output
             .queue(MoveTo(x, y))?
-            .queue(SetAttribute(Attribute::Reset))?
-            .queue(SetForegroundColor(self.foreground))?
-            .queue(SetBackgroundColor(self.background))?;
+            .queue(SetAttribute(Attribute::Reset))?;
         for (enabled, attribute) in [
             (self.bold, Attribute::Bold),
             (self.dim, Attribute::Dim),
@@ -281,7 +279,28 @@ impl RenderCell {
                 output.queue(SetAttribute(attribute))?;
             }
         }
+        write_color(output, self.foreground, true)?;
+        write_color(output, self.background, false)?;
         output.queue(Print(&self.text))?;
+        Ok(())
+    }
+}
+
+fn write_color(output: &mut impl Write, color: Color, foreground: bool) -> std::io::Result<()> {
+    if let Color::AnsiValue(index @ 0..=15) = color {
+        let code = match (foreground, index) {
+            (true, 0..=7) => 30 + index,
+            (true, 8..=15) => 90 + index - 8,
+            (false, 0..=7) => 40 + index,
+            (false, 8..=15) => 100 + index - 8,
+            _ => unreachable!(),
+        };
+        write!(output, "\x1b[{code}m")
+    } else if foreground {
+        output.queue(SetForegroundColor(color))?;
+        Ok(())
+    } else {
+        output.queue(SetBackgroundColor(color))?;
         Ok(())
     }
 }
@@ -459,8 +478,8 @@ impl Canvas {
             bounds.y,
             usize::from(bounds.width),
             "",
-            FOREGROUND,
-            BACKGROUND,
+            Color::Reset,
+            Color::Reset,
         );
         let mut x = bounds.x;
         for (index, open) in workspaces.open.into_iter().enumerate() {
@@ -835,11 +854,33 @@ mod tests {
             let cell = rendered(&parser, false);
             assert_eq!(cell.foreground, Color::AnsiValue(index));
             assert_eq!(cell.background, Color::AnsiValue(index));
-            assert_eq!(
-                emitted(&cell),
-                format!("\x1b[1;1H\x1b[0m\x1b[38;5;{index}m\x1b[48;5;{index}mX")
-            );
+            let emitted_colors = if index < 16 {
+                let foreground = if index < 8 {
+                    30 + index
+                } else {
+                    90 + index - 8
+                };
+                let background = if index < 8 {
+                    40 + index
+                } else {
+                    100 + index - 8
+                };
+                format!("\x1b[{foreground}m\x1b[{background}m")
+            } else {
+                format!("\x1b[38;5;{index}m\x1b[48;5;{index}m")
+            };
+            assert_eq!(emitted(&cell), format!("\x1b[1;1H\x1b[0m{emitted_colors}X"));
         }
+    }
+
+    #[test]
+    fn bold_basic_ansi_colors_keep_the_hosts_brightening_behavior() {
+        let mut parser = terminal();
+        parser.process(b"\x1b[1;34mX");
+        assert_eq!(
+            emitted(&rendered(&parser, false)),
+            "\x1b[1;1H\x1b[0m\x1b[1m\x1b[34m\x1b[49mX"
+        );
     }
 
     #[test]
@@ -849,12 +890,16 @@ mod tests {
         let cell = rendered(&parser, false);
         assert_eq!(cell.foreground, Color::Rgb { r: 1, g: 2, b: 3 });
         assert_eq!(cell.background, Color::Rgb { r: 4, g: 5, b: 6 });
-        assert!(emitted(&cell).ends_with("\x1b[2m\x1b[3m\x1b[4m\x1b[7mX"));
+        let output = emitted(&cell);
+        assert!(
+            output.starts_with("\x1b[1;1H\x1b[0m\x1b[2m\x1b[3m\x1b[4m\x1b[7m"),
+            "{output:?}"
+        );
         parser.process(b"\x1b[?5h");
         assert!(!rendered(&parser, false).inverse);
         parser.process(b"\r\x1b[0mX");
         let cell = rendered(&parser, false);
-        assert_eq!(emitted(&cell), "\x1b[1;1H\x1b[0m\x1b[39m\x1b[49m\x1b[7mX");
+        assert_eq!(emitted(&cell), "\x1b[1;1H\x1b[0m\x1b[7m\x1b[39m\x1b[49mX");
         let selected = rendered(&parser, true);
         assert_eq!(
             (selected.foreground, selected.background),
@@ -1060,6 +1105,8 @@ mod tests {
         assert_eq!(canvas.cells[1].background, FOCUSED_BORDER);
         assert_eq!(canvas.cells[4].text, "3");
         assert_eq!(canvas.cells[4].background, SELECTION);
+        assert_eq!(canvas.cells[0].background, FOCUSED_BORDER);
+        assert_eq!(canvas.cells[7].background, Color::Reset);
         assert!(!canvas.cells.iter().any(|cell| cell.text == "2"));
     }
 }
