@@ -23,7 +23,6 @@ def emit_directory(path):
                 "label": label,
             }
         ),
-        flush=True,
     )
 
 
