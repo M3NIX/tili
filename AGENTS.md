@@ -74,7 +74,9 @@ focus. Clicking without moving the pointer does not change keyboard focus.
 Rendering uses a retained cell buffer and updates only changed cells; ordinary
 pane and launcher changes do not clear the screen.
 
-Drag across pane text to select it. Only populated text cells are highlighted,
+Drag across pane text to select it. Selection begins only after the pointer moves
+to another cell while pressed; a plain click neither highlights text nor copies it.
+Only populated text cells are highlighted,
 and an entirely empty selection is discarded. `tastty-core` owns selection
 anchors, scrollback coordinates, multiline extraction, wide characters, and
 soft-wrap handling; tili does not reconstruct selected text itself. Releasing
@@ -125,7 +127,8 @@ menu-script select <entry-id>
 `execute`, `replace_pane`, and `close`. Commands and argument arrays are passed
 directly to the operating system; tili never constructs a shell command line.
 Only configure trusted scripts because they run with the current user's
-privileges. Output is bounded, operations time out, and superseded requests are
+privileges. Output is bounded to 20 MiB for stdout and 1 MiB for stderr per
+invocation, with at most 50,000 list entries. Operations time out, and superseded requests are
 cancelled. List/select scripts run in their own process group, which is stopped
 when the request finishes, fails, times out, or is cancelled. The timeout also
 covers descendants holding output pipes open. Scripts must not daemonize or

@@ -53,6 +53,7 @@ struct App {
     launcher_tx: SyncSender<LauncherEvent>,
     notice: Option<String>,
     selection: Option<PaneId>,
+    selection_press: Option<(PaneId, Position)>,
     pending_clipboard: Option<String>,
 }
 
@@ -97,6 +98,7 @@ impl App {
             launcher_tx,
             notice: None,
             selection: None,
+            selection_press: None,
             pending_clipboard: None,
         })
     }
@@ -196,19 +198,32 @@ impl App {
             });
         }
 
-        let selected_pane = self.selection;
         if matches!(
             mouse.kind,
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-        ) && let Some(pane_id) = selected_pane
+        ) && let Some((pane_id, origin)) = self.selection_press
             && let Some(position) = pane_position(&visible, pane_id, mouse.column, mouse.row, true)
         {
-            let _ = self
-                .panes
-                .get_mut(&pane_id)
-                .is_some_and(|pane| pane.selection_extend(position));
-            if mouse.kind == MouseEventKind::Up(MouseButton::Left) && !self.queue_selected_text() {
-                self.clear_selection();
+            if self.selection.is_none()
+                && position != origin
+                && self
+                    .panes
+                    .get_mut(&pane_id)
+                    .is_some_and(|pane| pane.selection_start(origin))
+            {
+                self.selection = Some(pane_id);
+            }
+            if self.selection == Some(pane_id) {
+                let _ = self
+                    .panes
+                    .get_mut(&pane_id)
+                    .is_some_and(|pane| pane.selection_extend(position));
+            }
+            if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                self.selection_press = None;
+                if self.selection.is_some() && !self.queue_selected_text() {
+                    self.clear_selection();
+                }
             }
             return Ok(EventResult::Redraw);
         }
@@ -222,13 +237,7 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if select_locally => {
                 self.clear_selection();
-                if self
-                    .panes
-                    .get_mut(&pane_id)
-                    .is_some_and(|pane| pane.selection_start(position))
-                {
-                    self.selection = Some(pane_id);
-                }
+                self.selection_press = Some((pane_id, position));
                 Ok(EventResult::Redraw)
             }
             MouseEventKind::ScrollUp if !reports_mouse => {
@@ -309,6 +318,7 @@ impl App {
     }
 
     fn clear_selection(&mut self) {
+        self.selection_press = None;
         if let Some(pane_id) = self.selection.take()
             && let Some(pane) = self.panes.get_mut(&pane_id)
         {
@@ -687,6 +697,12 @@ impl App {
         workspace.layout.close(pane_id)?;
         if self.selection == Some(pane_id) {
             self.selection = None;
+        }
+        if self
+            .selection_press
+            .is_some_and(|(pressed, _)| pressed == pane_id)
+        {
+            self.selection_press = None;
         }
         self.panes.remove(&pane_id);
         self.retain_failed_panes.remove(&pane_id);
@@ -1638,6 +1654,43 @@ os._exit(int(sys.argv[2]))
         assert!(expanded.cols > narrow);
         assert_eq!(expanded.cols, 78);
         assert_eq!(expanded.rows, 21);
+    }
+
+    #[test]
+    fn clicking_text_without_cell_movement_preserves_clipboard() {
+        let (pty_tx, _pty_rx) = mpsc::sync_channel(128);
+        let (launcher_tx, _launcher_rx) = mpsc::sync_channel(128);
+        let config = test_config(std::path::Path::new("/tmp/tili-selection-test"));
+        let mut app = App::new(80, 24, pty_tx, launcher_tx, &config).unwrap();
+        app.panes
+            .get_mut(&PaneId(1))
+            .unwrap()
+            .process_output(b"hello")
+            .unwrap();
+
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            for same_cell_drag in [false, true] {
+                app.pending_clipboard = Some("previous clipboard".to_owned());
+                let mut kinds = vec![MouseEventKind::Down(MouseButton::Left)];
+                if same_cell_drag {
+                    kinds.push(MouseEventKind::Drag(MouseButton::Left));
+                }
+                kinds.push(MouseEventKind::Up(MouseButton::Left));
+                for kind in kinds {
+                    app.handle_terminal(TerminalEvent::Mouse(MouseEvent {
+                        kind,
+                        column: 1,
+                        row: 2,
+                        modifiers,
+                    }))
+                    .unwrap();
+                    assert_eq!(app.selection, None);
+                    assert_eq!(app.panes[&PaneId(1)].selected_text(), None);
+                    assert_eq!(app.pending_clipboard.as_deref(), Some("previous clipboard"));
+                }
+                assert!(app.selection_press.is_none());
+            }
+        }
     }
 
     #[test]
