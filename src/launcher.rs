@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::{BuiltinMode, LauncherConfig};
 use crate::pty::CommandSpec;
 
-const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
-const MAX_ENTRIES: usize = 10_000;
+const MAX_STDOUT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_STDERR_BYTES: usize = 1024 * 1024;
+const MAX_ENTRIES: usize = 50_000;
 const MAX_FIELD_BYTES: usize = 4_096;
 const MAX_ARGUMENTS: usize = 128;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -501,8 +502,8 @@ fn run_script(
         }
         for _ in 0..32 {
             let previous_length = stdout.bytes.len() + stderr.bytes.len();
-            stdout.read_available(&mut stdout_pipe)?;
-            stderr.read_available(&mut stderr_pipe)?;
+            stdout.read_available(&mut stdout_pipe, MAX_STDOUT_BYTES)?;
+            stderr.read_available(&mut stderr_pipe, MAX_STDERR_BYTES)?;
             if stdout.exceeded
                 || stderr.exceeded
                 || stdout.bytes.len() + stderr.bytes.len() == previous_length
@@ -540,7 +541,7 @@ struct BoundedOutput {
 }
 
 impl BoundedOutput {
-    fn read_available(&mut self, reader: &mut impl Read) -> Result<(), String> {
+    fn read_available(&mut self, reader: &mut impl Read, limit: usize) -> Result<(), String> {
         if self.eof {
             return Ok(());
         }
@@ -548,7 +549,7 @@ impl BoundedOutput {
         match reader.read(&mut buffer) {
             Ok(0) => self.eof = true,
             Ok(length) => {
-                let remaining = MAX_OUTPUT_BYTES.saturating_sub(self.bytes.len());
+                let remaining = limit.saturating_sub(self.bytes.len());
                 self.bytes
                     .extend_from_slice(&buffer[..length.min(remaining)]);
                 self.exceeded |= length > remaining;

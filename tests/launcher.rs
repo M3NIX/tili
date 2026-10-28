@@ -154,11 +154,11 @@ fn parses_json_lines_and_rejects_duplicate_ids() {
 fn script_output_limits_and_failure_status_are_reported() {
     for (body, expected) in [
         (
-            "import sys; sys.stdout.write('x' * 2097152)",
+            "import sys; sys.stdout.write('x' * (20 * 1024 * 1024 + 1))",
             "output limit",
         ),
         (
-            "import sys; sys.stderr.write('x' * 2097152)",
+            "import sys; sys.stderr.write('x' * (1024 * 1024 + 1))",
             "output limit",
         ),
         (
@@ -180,6 +180,27 @@ fn script_output_limits_and_failure_status_are_reported() {
         }
         fs::remove_dir_all(directory).unwrap();
     }
+}
+
+#[test]
+fn script_output_at_stdout_limit_is_accepted() {
+    let directory = temporary_directory("launcher-large-output");
+    let script = directory.join("menu.py");
+    write_executable_script(
+        &script,
+        "#!/usr/bin/env python3\nimport sys\nrecord = '{\"id\":\"home\",\"label\":\"~\"}\\n'\nsys.stdout.write(record + '\\n' * (20 * 1024 * 1024 - len(record)))\n",
+    );
+    let configuration = config(vec![("test", script)]);
+    let mut launcher = Launcher::new(&configuration);
+    let (events, receiver) = mpsc::sync_channel(128);
+    launcher.open(&events);
+    match receiver.recv_timeout(TEST_TIMEOUT).unwrap() {
+        LauncherEvent::Listed { result, .. } => {
+            assert_eq!(result.unwrap(), vec![entry("home", "~")]);
+        }
+        event => panic!("unexpected event: {event:?}"),
+    }
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

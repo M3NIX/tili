@@ -21,7 +21,6 @@ def emit_directory(path):
             {
                 "id": str(path),
                 "label": label,
-                "description": str(path),
             }
         ),
         flush=True,
